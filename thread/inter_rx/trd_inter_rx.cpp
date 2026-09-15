@@ -1,11 +1,15 @@
 /**
  * @file trd_inter_rx.cpp
  * @author qingyu
- * @brief 下板→上板接收线程
- *        - 状态帧（Dir::Down / 0x200）：ISR 只搬运 → 线程解析 + 超时判定 → zbus 发布
+ * @brief 下板→上板接收线程（经典 CAN 拆帧）
+ *        - 2 个分片帧（0x200 / 0x201）在回调里按固定偏移拼进聚合帧缓冲
+ *        - 线程按发送周期读一份一致快照 → 解析 + 超时判定 → 发布 zbus
  *
  * 本组件只负责"收"：user-can2 总线由发送侧（thread/mcu_inter）持有并完成
  * Init + 设置收帧分发入口，这里只注册 CAN_RX_HANDLER。
+ *
+ * ⚠️ 拆帧语义：分片之间不做跨片一致性保证；某片丢失时该字节段沿用上一周期，
+ *    下个周期自动补齐（对周期性状态广播可接受）。
  *
  * 消费者用法（1kHz 循环内）：
  * @code
@@ -13,11 +17,11 @@
  *   if (zbus_chan_read(&pub_from_body, &body, K_NO_WAIT) != 0) {
  *       // 读失败 → 沿用上一轮值
  *   }
- *   if (!body.online) { // 安全降级 } else { // 使用 body.gimbal.yaw / body.shooter.bullet_speed }
+ *   if (!body.online) { /* 安全降级 *\/ } else { /* body.gimbal.yaw / body.shooter.bullet_speed *\/ }
  * @endcode
  *
- * @version 0.1
- * @date 2026-09-14
+ * @version 0.6
+ * @date 2026-09-15
  *
  * @copyright Copyright (c) 2026
  */
@@ -36,75 +40,102 @@
 
 LOG_MODULE_REGISTER(inter_rx, LOG_LEVEL_INF);
 
+// 链接段边界（cmd/linker/dust_init.ld 提供）。必须在全局作用域声明：
+// 放到命名空间里会被 C++ 修饰成 thread::inter_rx::__can_rx2_start，链接找不到。
+extern const CanRxEntry __can_rx2_start[], __can_rx2_end[];
+
 namespace thread::inter_rx
 {
     static Thread<2048> thread_{};
 
-    static constexpr inter_cmd::Dir kDir        = inter_cmd::Dir::Down;   // 本线程接收方向
-    static constexpr uint32_t       kRxTimeoutMs = 30;                    // 超时判离线
-    static constexpr uint32_t       kPollMs      = 1;
+    static constexpr inter_cmd::Dir kDir         = inter_cmd::Dir::Down;  // 本线程接收方向
+    static constexpr uint8_t        kSliceNum    = inter_cmd::FrameCount(kDir);  // 2
+    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 12
+    static constexpr uint32_t       kRxTimeoutMs = 60;   // 发送周期 2ms → 连续丢 30 轮才判离线
+    static constexpr uint32_t       kPollMs      = 2;    // 与对端发送周期一致
 
-    // ---- ISR → 线程：最新原始状态帧（seqlock，避免读到撕裂的帧）----
+    // ---- ISR → 线程：聚合帧缓冲（spinlock 保证按字节不撕裂）----
     static struct
     {
-        uint8_t  data[inter_cmd::kDownFrameLen];
-        atomic_t seq;
-    } raw_state;
+        uint8_t           data[kFrameLen];
+        struct k_spinlock lock;
+        atomic_t          slice_cnt;      // 每收到一个分片 +1
+    } asm_;
 
-    K_SEM_DEFINE(raw_sem, 0, 1);
-
-    /// 状态帧入口：拷进最新帧槽 + 唤醒线程
-    static void StateRxHandler(uint8_t *data)
+    /// 分片入口：按固定偏移写进聚合帧缓冲
+    template <uint8_t SLICE>
+    static void StateSliceHandler(uint8_t *data)
     {
-        atomic_inc(&raw_state.seq);                    // 奇数：写者进行中
-        memcpy(raw_state.data, data, sizeof(raw_state.data));
-        atomic_inc(&raw_state.seq);                    // 偶数：写完
-        k_sem_give(&raw_sem);
+        constexpr uint8_t kLen = inter_cmd::SliceLen(kDir, SLICE);
+        if (kLen == 0) {
+            return;
+        }
+        constexpr uint8_t kOff = static_cast<uint8_t>(SLICE * inter_cmd::kClassicPayload);
+
+        k_spinlock_key_t key = k_spin_lock(&asm_.lock);
+        memcpy(asm_.data + kOff, data, kLen);
+        k_spin_unlock(&asm_.lock, key);
+
+        atomic_inc(&asm_.slice_cnt);
     }
 
-    // 注册到框架 CAN RX 分发段（.can_rx2，由 user_can2_rx_callback 按 ID 分发）
-    CAN_RX_HANDLER(USER_RX_CAN2, inter_cmd::StateTxId(kDir), StateRxHandler, state_200);
-
-    /// 取一份不撕裂的原始帧
-    static void ReadRaw(uint8_t *out)
-    {
-        atomic_t seq;
-        do
-        {
-            seq = atomic_get(&raw_state.seq);
-            if (seq & 1U) {
-                continue;                              // 写者进行中，重试
-            }
-            memcpy(out, raw_state.data, sizeof(raw_state.data));
-        } while (atomic_get(&raw_state.seq) != seq);
-    }
+    // 每个分片一个入口（帧数变化时必须同步加减；thread_init 会做启动自检）
+    CAN_RX_HANDLER(USER_RX_CAN2, inter_cmd::SliceId(kDir, 0), StateSliceHandler<0>, dn_s0);
+    CAN_RX_HANDLER(USER_RX_CAN2, inter_cmd::SliceId(kDir, 1), StateSliceHandler<1>, dn_s1);
 
     /// 按契约布局表解析并发布（方向/偏移/长度都来自 inter_cmd.hpp 的同一张表）
     static void Publish(const uint8_t *raw, bool online, uint16_t age_ms)
     {
         topic::from_body::Message msg{};
-        (void)inter_cmd::GetFrag(raw, kDir, inter_cmd::FrameType::StateGimbal,  msg.gimbal);
-        (void)inter_cmd::GetFrag(raw, kDir, inter_cmd::FrameType::StateShooter, msg.shooter);
+        (void)inter_cmd::GetFrag(raw, inter_cmd::Dir::Down,
+                                 inter_cmd::FrameType::StateGimbal,  msg.gimbal);
+        (void)inter_cmd::GetFrag(raw, inter_cmd::Dir::Down,
+                                 inter_cmd::FrameType::StateShooter, msg.shooter);
         msg.online = online;
         msg.age_ms = age_ms;
         (void)zbus_chan_pub(&pub_from_body, &msg, K_NO_WAIT);
     }
 
+    /// 启动自检：本方向注册的分片入口数必须等于契约要求的帧数
+    static bool SliceRegsValid()
+    {
+        const uint16_t first = inter_cmd::SliceId(kDir, 0);
+        uint8_t cnt = 0;
+        for (const CanRxEntry *e = __can_rx2_start; e < __can_rx2_end; ++e) {
+            if (e->id >= first && e->id < static_cast<uint16_t>(first + kSliceNum)) {
+                ++cnt;
+            }
+        }
+        if (cnt != kSliceNum) {
+            LOG_ERR("slice handlers = %u, expected %u (注册行没跟着帧数改?)",
+                    static_cast<unsigned>(cnt), static_cast<unsigned>(kSliceNum));
+            return false;
+        }
+        return true;
+    }
+
     static void Task(void*, void*, void*)
     {
-        uint8_t  raw[inter_cmd::kDownFrameLen] {};
+        uint8_t  buf[kFrameLen] {};
+        uint32_t last_cnt    = 0;
         uint32_t last_rx_ms  = 0;
         bool     ever_rx     = false;
         bool     online_prev = false;
 
         for (;;)
         {
-            const bool     fresh = (k_sem_take(&raw_sem, K_MSEC(kPollMs)) == 0);
+            const int64_t  tick  = k_uptime_get();
+            const uint32_t cnt   = static_cast<uint32_t>(atomic_get(&asm_.slice_cnt));
+            const bool     fresh = (cnt != last_cnt);
             const uint32_t now   = k_uptime_get_32();
 
             if (fresh)
             {
-                ReadRaw(raw);
+                k_spinlock_key_t key = k_spin_lock(&asm_.lock);
+                memcpy(buf, asm_.data, sizeof(buf));
+                k_spin_unlock(&asm_.lock, key);
+
+                last_cnt   = cnt;
                 last_rx_ms = now;
                 ever_rx    = true;
             }
@@ -112,12 +143,11 @@ namespace thread::inter_rx
             const uint32_t age    = ever_rx ? (now - last_rx_ms) : UINT32_MAX;
             const bool     online = ever_rx && (age <= kRxTimeoutMs);
 
-            // 只在「有新帧」或「在线状态翻转」时发布；离线时保留最后一帧数据
             if (fresh || online != online_prev)
             {
                 const uint16_t age16 = (age > UINT16_MAX) ? UINT16_MAX
                                                           : static_cast<uint16_t>(age);
-                Publish(raw, online, age16);
+                Publish(buf, online, age16);
 
                 if (online != online_prev) {
                     LOG_INF("lower board %s (age=%ums)", online ? "online" : "TIMEOUT",
@@ -125,13 +155,22 @@ namespace thread::inter_rx
                 }
                 online_prev = online;
             }
+
+            const int64_t remain = static_cast<int64_t>(kPollMs) - (k_uptime_get() - tick);
+            if (remain > 0) {
+                k_msleep(remain);
+            }
         }
     }
 
     bool thread_init()
     {
-        // 总线 Init / FD 模式 / 收帧分发入口由发送侧（thread/mcu_inter）负责
-        LOG_INF("inter_rx ready (timeout=%ums)", kRxTimeoutMs);
+        // 总线 Init / 收帧分发入口由发送侧（thread/mcu_inter）负责
+        if (!SliceRegsValid()) {
+            return false;
+        }
+        LOG_INF("inter_rx ready (dir=down, %u slices, timeout=%ums)",
+                static_cast<unsigned>(kSliceNum), kRxTimeoutMs);
         return true;
     }
 
