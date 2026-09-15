@@ -1,0 +1,146 @@
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/stm32-pinctrl.h>
+#include <dt-bindings/dma/stm32_dma.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	aliases {
+		user-can1    = &fdcan1;
+		user-can2	 = &fdcan2;
+		remote-uart  = &usart1;
+		debug-uart	 = &usart3;
+		bmi088-accel = &bmi088_accel;
+		bmi088-gyro  = &bmi088_gyro;
+		imu-pwm      = &imu_pwm;
+	};
+	chosen {
+		zephyr,console = &uart7;
+		zephyr,shell-uart = &uart7;
+	};
+	leds {
+		compatible = "gpio-leds";
+		led_alert: led_alert {
+			gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
+			label = "LED_RED";
+		};
+	};
+
+	pwmleds {
+		compatible = "pwm-leds";
+
+		imu_pwm: imu_pwm {
+			pwms = <&pwm3 4 PWM_NSEC(2083542) PWM_POLARITY_NORMAL>;
+			label = "IMU Heater";
+			status = "okay";
+		};
+	};
+};
+
+/* IMU 加热器 PWM：TIM3_CH4 / PB1，PSC=24，ARR=10000（≈2.0835ms，~480Hz） */
+&timers3 {
+	st,prescaler = <24>;
+	status = "okay";
+
+	pwm3: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch4_pb1>;
+		pinctrl-names = "default";
+	};
+};
+
+&pinctrl {
+	tim3_ch4_pb1: tim3_ch4_pb1 {
+		pinmux = <STM32_PINMUX('B', 1, AF2)>;
+	};
+};
+
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
+	pinctrl-names = "default";
+	current-speed = <921600>;
+	dmas = <&dmamux1 0 42 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+	       <&dmamux1 1 41 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
+	status = "okay";
+};
+
+&usart3 {
+	pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "okay";
+};
+
+&uart7 {
+	pinctrl-0 = <&uart7_tx_pe8 &uart7_rx_pe7>;
+	pinctrl-names = "default";
+	current-speed = <921600>;
+	status = "okay";
+};
+
+/* USART1 DMA（遥控器接收）：DMAMUX1 通道 0/1 映射到 DMA1 */
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+&fdcan1 {
+	pinctrl-0 = <&fdcan1_rx_pd0 &fdcan1_tx_pd1>;
+	pinctrl-names = "default";
+	bitrate = <1000000>;
+	sample-point = <800>;
+	bitrate-data = <2000000>;
+	sample-point-data = <750>;
+	status = "okay";
+};
+
+&fdcan2 {
+	pinctrl-0 = <&fdcan2_rx_pb5 &fdcan2_tx_pb6>;
+	pinctrl-names = "default";
+	bitrate = <1000000>;
+	sample-point = <800>;
+	bitrate-data = <2000000>;
+	sample-point-data = <750>;
+	status = "okay";
+};
+
+&spi2 {
+	pinctrl-0 = <&spi2_sck_pb13 &spi2_miso_pc2_c &spi2_mosi_pc1>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioc 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+		   <&gpioc 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+	status = "okay";
+
+	bmi088_accel: bmi088-accel@0 {
+		compatible = "bosch,bmi08x-accel";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+		spi-cpol;
+		spi-cpha;
+		int-gpios = <&gpioe 10 GPIO_ACTIVE_HIGH>;
+		int1-map-io = <0x01>;
+		int2-map-io = <0x00>;
+		int1-conf-io = <0x0A>;
+		int2-conf-io = <0x00>;
+		accel-hz = "800";
+		accel-fs = <6>;
+		status = "okay";
+	};
+
+	bmi088_gyro: bmi088-gyro@1 {
+		compatible = "bosch,bmi08x-gyro";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+		spi-cpol;
+		spi-cpha;
+		int-gpios = <&gpioe 12 GPIO_ACTIVE_HIGH>;
+		int3-4-map-io = <0x01>;
+		int3-4-conf-io = <0x01>;
+		gyro-hz = "2000_230";
+		gyro-fs = <2000>;
+		status = "okay";
+	};
+};

@@ -1,0 +1,7 @@
+config INTER_CMD
+    bool "Inter-board command interface"
+    default y
+    select DUST_TPC_TO_MCU_TX
+    help
+      Shared command interface for the upper/lower board link.
+      Requires the to_mcu_tx topic channel.

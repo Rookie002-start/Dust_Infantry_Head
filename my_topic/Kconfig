@@ -1,0 +1,13 @@
+config DUST_TPC_TO_MCU_TX
+    default n
+    bool "CAN TX queue"
+    help
+        MCU transmit message queue (upper/lower board), selected by TRD_MCU_INTER.
+
+config DUST_TPC_FROM_BODY
+    default n
+    bool "Lower board RX channel"
+    select ZBUS
+    help
+        Received data contract from the lower board (state channel, zbus).
+        Selected by TRD_INTER_RX.

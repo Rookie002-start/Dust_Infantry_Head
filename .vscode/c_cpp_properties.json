@@ -1,0 +1,36 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/build/zephyr/include/generated",
+                "${workspaceFolder}/build/zephyr/include/generated/zephyr",
+                "/home/rookie/zephyrproject/zephyr/include",
+                "/home/rookie/zephyrproject/zephyr/include/zephyr",
+                "/home/rookie/zephyrproject/zephyr/arch",
+                "/home/rookie/zephyrproject/zephyr/kernel/include",
+                "/home/rookie/zephyrproject/zephyr/lib/libc/minimal/include",
+                "/home/rookie/zephyrproject/zephyr/soc",
+                "/home/rookie/zephyrproject/zephyr/boards",
+                "/home/rookie/zephyrproject/zephyr/drivers",
+                "/home/rookie/zephyrproject/zephyr/subsys",
+                "/home/rookie/zephyrproject/zephyr_user",
+                "/home/rookie/zephyrproject/zephyr_user/platform/cmsis",
+                "/home/rookie/zephyrproject/zephyr_user/framework",
+                "/home/rookie/zephyrproject/custom_boards",
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/arm-zephyr-eabi/include",
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/lib/gcc/arm-zephyr-eabi/14.3.0/include"
+            ],
+            "defines": [
+                "__ZEPHYR__=1",
+                "CONFIG_PRJ_MAIN=1"
+            ],
+            "compilerPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc",
+            "cStandard": "c11",
+            "intelliSenseMode": "linux-gcc-arm"
+        }
+    ],
+    "version": 4
+}

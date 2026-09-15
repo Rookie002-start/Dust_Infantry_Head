@@ -1,0 +1,101 @@
+# temp/Kconfig - 用户区业务 Kconfig（位置：/home/rookie/zephyrproject/projects/temp）
+# 业务门禁符号（PRJ_MAIN / TRD_XXX）保持原名，架构层 DUST_ 符号由
+# framework 模块机制自动加载（module.yml kconfig: zephyr/Kconfig）。
+
+config DEBUG_LOG
+    bool "Enable Zephyr LOG output"
+    default n
+    select LOG
+    select LOG_BACKEND_UART
+
+config PRJ_MAIN
+    bool "Main business project"
+    default n
+    select DEBUG_LOG
+
+if PRJ_MAIN
+
+# =================               TRD_CONFIG                ====================
+
+config TRD_GPIO
+    bool "GPIO thread task"
+    default n
+    help
+      Enable the GPIO idle thread.
+
+config TRD_CAN
+    bool "CAN thread task"
+    default y
+    select DUST_COM_CAN
+    select DUST_TPC_TO_CAN_TX
+    help
+      Enable the CAN idle thread.
+
+config TRD_MCU_INTER
+    bool "MCU upper/lower board FDCAN thread"
+    default n
+    select DUST_COM_CAN
+    select DUST_TPC_TO_MCU_TX
+    select INTER_CMD
+    help
+      Enable the upper/lower board communication thread (fdcan2 / user-can2).
+      Note: 依赖设备树别名 user-can2，仅在有该总线的板卡上开启
+            （dm_mc02 的板级 conf 里已打开）。
+
+config TRD_INTER_RX
+    bool "Inter-board RX thread (from lower board)"
+    default n
+    select DUST_COM_CAN
+    select DUST_TPC_FROM_BODY
+    select INTER_CMD
+    help
+      上板 ← 下板接收线程：解析 Dir::Down 聚合状态帧（0x200）+ 超时判定 → zbus 发布。
+      总线由 TRD_MCU_INTER 持有并初始化，本项只注册 CAN_RX_HANDLER。
+
+config TRD_TEST
+    bool "TEST thread task"
+    default y
+    help
+      Enable the TEST thread.
+
+config TRD_REMOTE
+    bool "REMOTE thread task"
+    default n
+    select DUST_MOD_DEV_REMOTE
+    select DUST_MOD_DEV_REMOTE_VT13
+    help
+      Enable the REMOTE thread.
+
+config TRD_IMU
+    bool "IMU thread task"
+    default n
+    select DUST_MOD_DEV_IMU
+    help
+      Enable the IMU thread.
+
+choice TRD_IMU_SOURCE
+    prompt "IMU source"
+    default TRD_IMU_SRC_HIPNUC
+    depends on TRD_IMU
+    help
+      选择底层 IMU 数据源。三种源互斥：链接段 .imu 只允许注册一个设备。
+
+config TRD_IMU_SRC_BMI088
+    bool "BMI088 (SPI, with heater)"
+    select DUST_MOD_DEV_IMU_BMI088
+
+config TRD_IMU_SRC_ICM42688P
+    bool "ICM42688P (SPI, with heater)"
+    select DUST_MOD_DEV_IMU_ICM42688P
+
+config TRD_IMU_SRC_HIPNUC
+    bool "HiPNUC (UART, fused output)"
+    select DUST_MOD_DEV_IMU_HIPNUC
+
+endchoice
+
+endif # PRJ_MAIN
+
+source "Kconfig.zephyr"
+rsource "my_topic/Kconfig"
+rsource "inter_cmd/Kconfig"

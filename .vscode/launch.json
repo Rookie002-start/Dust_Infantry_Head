@@ -1,0 +1,200 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "HPM5361 调试 (J-Link JTAG)",
+            "type": "cppdbg",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "program": "${workspaceFolder}/build/zephyr/zephyr.elf",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gdb",
+            "miDebuggerServerAddress": "localhost:3333",
+            "debugServerPath": "/home/rookie/openocd-hpm/bin/openocd",
+            "debugServerArgs": "-s /home/rookie/Zephyr_HPMicro/sdk_env/hpm_sdk/boards/openocd -s /home/rookie/Zephyr_HPMicro/sdk_glue_user/boards/openocd -f ${workspaceFolder}/boards/hpm/hpm5361icb/openocd-debug.cfg",
+            "serverStarted": "Listening on port .* for gdb connections",
+            "serverLaunchTimeout": 30000,
+            "filterStderr": true,
+            "setupCommands": [
+                {
+                    "description": "复位 + 使能时钟，并停住 CPU",
+                    "text": "monitor reset init",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "开启 gdb pretty printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "launchCompleteCommand": "exec-continue",
+            "externalConsole": false
+        },
+        {
+            "name": "HPM5361 附加 (J-Link JTAG)",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceFolder}/build/zephyr/zephyr.elf",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gdb",
+            "miDebuggerServerAddress": "localhost:3333",
+            "setupCommands": [
+                {
+                    "description": "开启 gdb pretty printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "processId": "1"
+        },
+        {
+            "name": "Debug (OpenOCD + CMSIS-DAP)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/zephyr/zephyr.elf",
+            "serverpath": "${workspaceRoot}/boards/st/board_dm_mc02/openocd-cmsis-dap-wrapper.sh",
+            "configFiles": [
+                "${workspaceRoot}/boards/st/board_dm_mc02/openocd.cfg"
+            ],
+            "searchDir": [
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/share/openocd/scripts",
+                "/usr/share/openocd/scripts",
+                "/home/rookie/zephyrproject/zephyr"
+            ],
+            "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
+            "runToEntryPoint": "main",
+            "rttConfig": {
+                "enabled": false,
+                "address": "",
+                "decoders": [
+                    {
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "Attach (OpenOCD + CMSIS-DAP)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/zephyr/zephyr.elf",
+            "serverpath": "${workspaceRoot}/boards/st/board_dm_mc02/openocd-cmsis-dap-wrapper.sh",
+            "configFiles": [
+                "${workspaceRoot}/boards/st/board_dm_mc02/openocd.cfg"
+            ],
+            "searchDir": [
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/share/openocd/scripts",
+                "/usr/share/openocd/scripts",
+                "/home/rookie/zephyrproject/zephyr"
+            ],
+            "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd"
+        },
+        {
+            "name": "Debug (OpenOCD + ST-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/zephyr/zephyr.elf",
+            "configFiles": [
+                "${workspaceRoot}/boards/st/board_dm_mc02/openocd.cfg"
+            ],
+            "searchDir": [
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/share/openocd/scripts",
+                "/usr/share/openocd/scripts",
+                "/home/rookie/zephyrproject/zephyr"
+            ],
+            "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
+            "runToEntryPoint": "main",
+            "rttConfig": {
+                "enabled": false,
+                "address": "",
+                "decoders": [
+                    {
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "Attach (OpenOCD + ST-Link)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/zephyr/zephyr.elf",
+            "configFiles": [
+                "${workspaceRoot}/boards/st/board_dm_mc02/openocd.cfg"
+            ],
+            "searchDir": [
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/share/openocd/scripts",
+                "/usr/share/openocd/scripts",
+                "/home/rookie/zephyrproject/zephyr"
+            ],
+            "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd"
+        },
+        {
+            "name": "Debug (OpenOCD + J-Link JTAG)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/zephyr/zephyr.elf",
+            "configFiles": [
+                "${workspaceRoot}/boards/st/board_dm_mc02/openocd-jlink.cfg"
+            ],
+            "searchDir": [
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/share/openocd/scripts",
+                "/usr/share/openocd/scripts",
+                "/home/rookie/zephyrproject/zephyr"
+            ],
+            "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
+            "runToEntryPoint": "main",
+            "rttConfig": {
+                "enabled": false,
+                "address": "",
+                "decoders": [
+                    {
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "Attach (OpenOCD + J-Link JTAG)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "openocd",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/zephyr/zephyr.elf",
+            "configFiles": [
+                "${workspaceRoot}/boards/st/board_dm_mc02/openocd-jlink.cfg"
+            ],
+            "searchDir": [
+                "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/share/openocd/scripts",
+                "/usr/share/openocd/scripts",
+                "/home/rookie/zephyrproject/zephyr"
+            ],
+            "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd"
+        }
+    ]
+}
