@@ -7,6 +7,7 @@
 	aliases {
 		user-can1    = &fdcan1;
 		user-can2	 = &fdcan2;
+		inter-can    = &fdcan2;
 		remote-uart  = &usart1;
 		debug-uart	 = &usart3;
 		bmi088-accel = &bmi088_accel;
@@ -92,6 +93,8 @@
 	pinctrl-names = "default";
 	bitrate = <1000000>;
 	sample-point = <800>;
+	bitrate-data = <2000000>;
+	sample-point-data = <750>;
 	status = "okay";
 };
 
@@ -100,6 +103,8 @@
 	pinctrl-names = "default";
 	bitrate = <1000000>;
 	sample-point = <800>;
+	bitrate-data = <2000000>;
+	sample-point-data = <750>;
 	status = "okay";
 };
 

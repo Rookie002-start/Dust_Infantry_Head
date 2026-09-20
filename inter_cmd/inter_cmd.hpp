@@ -3,14 +3,14 @@
  * @author qingyu
  * @brief 上下板通信接口契约（共享：任意业务线程发数据都走这里）
  *
- * 传输：**经典 CAN（8 字节载荷），聚合帧按字节拆成多帧发送**
- *   · Dir::Up   上板 → 下板：62B → 8 帧，CAN ID 0x100 ~ 0x107
- *   · Dir::Down 下板 → 上板：12B → 2 帧，CAN ID 0x200 ~ 0x201
- *   同一序号 <=> 同一段字节（固定映射），接收端无需拼包状态机：
- *   丢一帧只影响那一段，下个周期自动补回。
+ * 传输：**CAN FD 整帧**（FDF + BRS，数据段 2Mbps，DLC = can_bytes_to_dlc(帧长)）
+ *   · Dir::Up   上板 → 下板：一帧，CAN ID 0x100（帧长 kUpFrameLen）
+ *   · Dir::Down 下板 → 上板：一帧，CAN ID 0x200（帧长 kDownFrameLen）
+ *   整帧一次发完，接收端无需拼包；一帧内所有分片来自同一拍，天然一致。
+ *   要求两端都是 FDCAN 板（STM32F4 的 bxCAN 不支持 FD，不能用这套传输）。
  *
  * 只有状态分片，没有命令帧：业务线程 PostFrame() 分片 → 发送线程收集 →
- * 按 kStateFrags[] 表聚合成一帧 → 按序拆帧周期发出。
+ * 按 kStateFrags[] 表聚合成一帧 → 周期整帧发出。
  * 入队携带的 tag 只是"分片类型"标签，不是上线用的 CAN ID。
  *
  * 新增分片 = 加一枚举 + 一个结构体 + 表里加一行；帧长/校验/打包/解析全自动跟随。
@@ -222,53 +222,6 @@ namespace inter_cmd
         }
         return false;
     }
-
-    // ============ 经典 CAN 拆帧（传输层）============
-    // 帧序号 -> 字节段 是固定映射，所以收发双方都不需要拼包/序号状态机。
-
-    /// 经典 CAN 单帧载荷上限
-    constexpr uint8_t kClassicPayload = 8;
-
-    /// 某方向需要多少帧 = ceil(帧长 / 8)
-    constexpr uint8_t FrameCount(Dir d)
-    {
-        return static_cast<uint8_t>((FrameLen(d) + kClassicPayload - 1) / kClassicPayload);
-    }
-
-    constexpr uint8_t kUpFrameCount   = FrameCount(Dir::Up);     // 8（62B）
-    constexpr uint8_t kDownFrameCount = FrameCount(Dir::Down);   // 2（12B）
-
-    /// 某方向第 i 帧的 CAN ID（占用 StateTxId ~ StateTxId+7 这段）
-    constexpr uint16_t SliceId(Dir d, uint8_t i)
-    {
-        return static_cast<uint16_t>(StateTxId(d) + i);
-    }
-
-    /// 某方向第 i 帧承载的字节数（末帧可能不足 8；i 越界返回 0）
-    constexpr uint8_t SliceLen(Dir d, uint8_t i)
-    {
-        const uint8_t total = FrameLen(d);
-        const uint8_t off   = static_cast<uint8_t>(i * kClassicPayload);
-        if (off >= total) {
-            return 0;
-        }
-        const uint8_t rest = static_cast<uint8_t>(total - off);
-        return (rest > kClassicPayload) ? kClassicPayload : rest;
-    }
-
-    /// 编译期校验：拆帧必须完整覆盖聚合帧（无空洞、无越界）
-    constexpr bool SlicesCover(Dir d)
-    {
-        uint8_t sum = 0;
-        for (uint8_t i = 0; i < FrameCount(d); ++i) {
-            sum = static_cast<uint8_t>(sum + SliceLen(d, i));
-        }
-        return sum == FrameLen(d);
-    }
-
-    static_assert(kUpFrameCount   <= 8, "Up 拆帧数超出预留 ID 段 0x100~0x107");
-    static_assert(kDownFrameCount <= 8, "Down 拆帧数超出预留 ID 段 0x200~0x207");
-    static_assert(SlicesCover(Dir::Up)   && SlicesCover(Dir::Down), "拆帧未完整覆盖聚合帧");
 
     // ============ 发送接口（多线程可并发调用，底层 k_msgq 多生产者）============
 

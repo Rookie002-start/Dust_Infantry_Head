@@ -49,39 +49,30 @@ namespace thread::inter_rx
     static Thread<2048> thread_{};
 
     static constexpr inter_cmd::Dir kDir         = inter_cmd::Dir::Down;  // 本线程接收方向
-    static constexpr uint8_t        kSliceNum    = inter_cmd::FrameCount(kDir);  // 2
     static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 12
-    static constexpr uint32_t       kRxTimeoutMs = 60;   // 发送周期 2ms → 连续丢 30 轮才判离线
-    static constexpr uint32_t       kPollMs      = 2;    // 与对端发送周期一致
+    static constexpr uint32_t       kRxTimeoutMs = 30;   // 发送周期 1ms → 连续丢 30 轮才判离线
+    static constexpr uint32_t       kPollMs      = 1;    // 与对端发送周期一致
 
     // ---- ISR → 线程：聚合帧缓冲（spinlock 保证按字节不撕裂）----
     static struct
     {
         uint8_t           data[kFrameLen];
         struct k_spinlock lock;
-        atomic_t          slice_cnt;      // 每收到一个分片 +1
+        atomic_t          rx_cnt;         // 每收到一整帧 +1
     } asm_;
 
-    /// 分片入口：按固定偏移写进聚合帧缓冲
-    template <uint8_t SLICE>
-    static void StateSliceHandler(uint8_t *data)
+    /// 整帧入口：CAN FD 一帧就是全部（不存在跨分片混合），整体拷进缓冲
+    static void StateFrameHandler(uint8_t *data)
     {
-        constexpr uint8_t kLen = inter_cmd::SliceLen(kDir, SLICE);
-        if (kLen == 0) {
-            return;
-        }
-        constexpr uint8_t kOff = static_cast<uint8_t>(SLICE * inter_cmd::kClassicPayload);
-
         k_spinlock_key_t key = k_spin_lock(&asm_.lock);
-        memcpy(asm_.data + kOff, data, kLen);
+        memcpy(asm_.data, data, sizeof(asm_.data));
         k_spin_unlock(&asm_.lock, key);
 
-        atomic_inc(&asm_.slice_cnt);
+        atomic_inc(&asm_.rx_cnt);
     }
 
-    // 每个分片一个入口（帧数变化时必须同步加减；thread_init 会做启动自检）
-    CAN_RX_HANDLER(USER_RX_CAN2, inter_cmd::SliceId(kDir, 0), StateSliceHandler<0>, dn_s0);
-    CAN_RX_HANDLER(USER_RX_CAN2, inter_cmd::SliceId(kDir, 1), StateSliceHandler<1>, dn_s1);
+    // 一个方向一帧（CAN FD 整帧）
+    CAN_RX_HANDLER(USER_RX_CAN2, inter_cmd::StateTxId(kDir), StateFrameHandler, dn_frame);
 
     /// 按契约布局表解析并发布（方向/偏移/长度都来自 inter_cmd.hpp 的同一张表）
     static void Publish(const uint8_t *raw, bool online, uint16_t age_ms)
@@ -96,19 +87,19 @@ namespace thread::inter_rx
         (void)zbus_chan_pub(&pub_from_body, &msg, K_NO_WAIT);
     }
 
-    /// 启动自检：本方向注册的分片入口数必须等于契约要求的帧数
-    static bool SliceRegsValid()
+    /// 启动自检：本方向必须正好注册 1 个整帧入口
+    static bool FrameRegValid()
     {
-        const uint16_t first = inter_cmd::SliceId(kDir, 0);
+        const uint16_t id = inter_cmd::StateTxId(kDir);
         uint8_t cnt = 0;
         for (const CanRxEntry *e = __can_rx2_start; e < __can_rx2_end; ++e) {
-            if (e->id >= first && e->id < static_cast<uint16_t>(first + kSliceNum)) {
+            if (e->id == id) {
                 ++cnt;
             }
         }
-        if (cnt != kSliceNum) {
-            LOG_ERR("slice handlers = %u, expected %u (注册行没跟着帧数改?)",
-                    static_cast<unsigned>(cnt), static_cast<unsigned>(kSliceNum));
+        if (cnt != 1) {
+            LOG_ERR("frame handlers = %u, expected 1 (注册行与实际不符?)",
+                    static_cast<unsigned>(cnt));
             return false;
         }
         return true;
@@ -125,7 +116,7 @@ namespace thread::inter_rx
         for (;;)
         {
             const int64_t  tick  = k_uptime_get();
-            const uint32_t cnt   = static_cast<uint32_t>(atomic_get(&asm_.slice_cnt));
+            const uint32_t cnt   = static_cast<uint32_t>(atomic_get(&asm_.rx_cnt));
             const bool     fresh = (cnt != last_cnt);
             const uint32_t now   = k_uptime_get_32();
 
@@ -166,11 +157,11 @@ namespace thread::inter_rx
     bool thread_init()
     {
         // 总线 Init / 收帧分发入口由发送侧（thread/mcu_inter）负责
-        if (!SliceRegsValid()) {
+        if (!FrameRegValid()) {
             return false;
         }
-        LOG_INF("inter_rx ready (dir=down, %u slices, timeout=%ums)",
-                static_cast<unsigned>(kSliceNum), kRxTimeoutMs);
+        LOG_INF("inter_rx ready (dir=down, FD frame %uB, timeout=%ums)",
+                static_cast<unsigned>(kFrameLen), kRxTimeoutMs);
         return true;
     }
 
