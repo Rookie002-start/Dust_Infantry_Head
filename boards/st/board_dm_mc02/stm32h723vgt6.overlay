@@ -8,15 +8,16 @@
 		user-can1    = &fdcan1;
 		user-can2	 = &fdcan2;
 		inter-can    = &fdcan2;
-		remote-uart  = &usart1;
+		hipnuc-uart  = &usart1;      /* IMU：HiPNUC（115200，与 C 板 usart1 一致） */
+		remote-uart  = &uart7;       /* 遥控接收机（921600） */
 		debug-uart	 = &usart3;
 		bmi088-accel = &bmi088_accel;
 		bmi088-gyro  = &bmi088_gyro;
 		imu-pwm      = &imu_pwm;
 	};
 	chosen {
-		zephyr,console = &uart7;
-		zephyr,shell-uart = &uart7;
+		zephyr,console = &usart3;
+		zephyr,shell-uart = &usart3;
 	};
 	leds {
 		compatible = "gpio-leds";
@@ -58,7 +59,7 @@
 &usart1 {
 	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
 	pinctrl-names = "default";
-	current-speed = <921600>;
+	current-speed = <115200>;       /* HiPNUC IMU */
 	dmas = <&dmamux1 0 42 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
 	       <&dmamux1 1 41 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
 	dma-names = "tx", "rx";
@@ -76,10 +77,13 @@
 	pinctrl-0 = <&uart7_tx_pe8 &uart7_rx_pe7>;
 	pinctrl-names = "default";
 	current-speed = <921600>;
+	dmas = <&dmamux1 2 80 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+	       <&dmamux1 3 79 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
 	status = "okay";
 };
 
-/* USART1 DMA（遥控器接收）：DMAMUX1 通道 0/1 映射到 DMA1 */
+/* 串口 DMA：DMAMUX1 通道 0/1 → usart1(HiPNUC)、通道 2/3 → uart7(遥控)，都落在 DMA1 */
 &dma1 {
 	status = "okay";
 };
