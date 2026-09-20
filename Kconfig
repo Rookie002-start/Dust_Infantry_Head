@@ -8,6 +8,24 @@ config DEBUG_LOG
     select LOG
     select LOG_BACKEND_UART
 
+config DEBUG_RTT
+    bool "SEGGER RTT debug channel (log + variable print over probe)"
+    default n
+    select LOG
+    select HAS_SEGGER_RTT
+    select USE_SEGGER_RTT
+    select LOG_BACKEND_RTT
+    select SEGGER_RTT_CUSTOM_LOCKING
+    help
+      打开 SEGGER RTT：日志（LOG_INF/WRN/ERR）实时输出到调试探针的 RTT 通道，
+      业务代码也可以用 SEGGER_RTT_printf() 直接打变量，不占 UART。
+
+      RTT 走调试接口（SWD/JTAG）读写目标 RAM，所以需要 J-Link / OpenOCD
+      之类的调试器在线；查看方法见 docs/segger_rtt.md。
+
+      HAS_SEGGER_RTT 通常由 SoC 自己 select（STM32 会），这里显式 select
+      让非 STM32 板卡（如 HPM5361 RISC-V）也能打开。
+
 config PRJ_MAIN
     bool "Main business project"
     default n
@@ -25,7 +43,7 @@ config TRD_GPIO
 
 config TRD_CAN
     bool "CAN thread task"
-    default y
+    default n
     select DUST_COM_CAN
     select DUST_TPC_TO_CAN_TX
     help
@@ -36,9 +54,11 @@ config TRD_MCU_INTER
     default n
     select DUST_COM_CAN
     select DUST_TPC_TO_MCU_TX
+    select DUST_TPC_IMU_TO
+    select DUST_TPC_REMOTE_TO
     select INTER_CMD
     help
-      Enable the upper/lower board communication thread (fdcan2 / user-can2).
+      Enable the upper/lower board communication thread 
       Note: 依赖设备树别名 user-can2，仅在有该总线的板卡上开启
             （dm_mc02 的板级 conf 里已打开）。
 
@@ -54,7 +74,7 @@ config TRD_INTER_RX
 
 config TRD_TEST
     bool "TEST thread task"
-    default y
+    default n
     help
       Enable the TEST thread.
 

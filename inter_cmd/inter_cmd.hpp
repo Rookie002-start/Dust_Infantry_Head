@@ -4,7 +4,7 @@
  * @brief 上下板通信接口契约（共享：任意业务线程发数据都走这里）
  *
  * 传输：**经典 CAN（8 字节载荷），聚合帧按字节拆成多帧发送**
- *   · Dir::Up   上板 → 下板：61B → 8 帧，CAN ID 0x100 ~ 0x107
+ *   · Dir::Up   上板 → 下板：62B → 8 帧，CAN ID 0x100 ~ 0x107
  *   · Dir::Down 下板 → 上板：12B → 2 帧，CAN ID 0x200 ~ 0x201
  *   同一序号 <=> 同一段字节（固定映射），接收端无需拼包状态机：
  *   丢一帧只影响那一段，下个周期自动补回。
@@ -65,7 +65,7 @@ namespace inter_cmd
 
     // ============ 载荷结构体（packed：固定线缆布局，两端定义需完全一致）============
 
-    /// 状态分片（Up）：底盘/云台指令汇总（21B，偏移 0）
+    /// 状态分片（Up）：底盘/云台指令汇总 + 上板数据源标志（22B，偏移 0）
     struct __attribute__((packed)) CommState
     {
         float   yaw_angle;      // 云台偏航角【指令】(rad)
@@ -74,7 +74,17 @@ namespace inter_cmd
         float   chassis_vy;     // 底盘左右
         float   chassis_rot;    // 底盘自转
         uint8_t chassis_spin;   // 小陀螺（三态）
+        /// 上板数据源标志，见 kCommFlag*。下板必须先检查 kCommFlagLinkOk 再用上面的指令：
+        /// 只看 CAN 帧有没有到是不够的（上板数据源掉线时帧照样在发，只是内容是旧值/零值）。
+        uint8_t flags;
     };
+
+    /// CommState.flags 位定义（上板写入，下板读取）
+    constexpr uint8_t kCommFlagLinkOk = 1u << 0;   // 遥控链路有效：速度/云台指令可信
+    constexpr uint8_t kCommFlagImuOk  = 1u << 1;   // IMU 数据新鲜：ImuState 可信
+
+    inline bool CommLinkOk(const CommState &c) { return (c.flags & kCommFlagLinkOk) != 0u; }
+    inline bool CommImuOk(const CommState &c)  { return (c.flags & kCommFlagImuOk)  != 0u; }
 
     /// 状态分片（Up）：自瞄数据（24B，偏移 21）
     struct __attribute__((packed)) AutoAimState
@@ -96,12 +106,12 @@ namespace inter_cmd
         uint8_t pitch_omega[4];
     };
 
-    /// 状态分片（Down）：实测云台角【反馈】（8B，偏移 0）
-    /// ⚠️ 与 Up 方向 CommState 的 yaw/pitch 语义相反：那边是指令，这边是实测
+    /// 状态分片（Down）：云台电机反馈角（8B，偏移 0）
+    /// ⚠️ 与 Up 方向 CommState 的 yaw/pitch 语义相反：那边是指令角，这边是电机反馈角
     struct __attribute__((packed)) GimbalState
     {
-        float yaw;      // rad
-        float pitch;    // rad
+        float yaw;      // 云台电机反馈 yaw (rad)
+        float pitch;    // 云台电机反馈 pitch (rad)
     };
 
     /// 状态分片（Down）：子弹速度（4B，偏移 8）
@@ -113,12 +123,18 @@ namespace inter_cmd
     // ============ 聚合帧布局（唯一事实来源）============
 
     // 各分片在各自方向聚合帧中的偏移（协议事实，命名便于对照协议文档）
-    constexpr uint8_t kOffComm    = 0;    // CommState    21B → 0..20
-    constexpr uint8_t kOffAutoAim = 21;   // AutoAimState 24B → 21..44
-    constexpr uint8_t kOffImu     = 45;   // ImuState     16B → 45..60
+    constexpr uint8_t kOffComm    = 0;    // CommState    22B → 0..21
+    constexpr uint8_t kOffAutoAim = 22;   // AutoAimState 24B → 22..45
+    constexpr uint8_t kOffImu     = 46;   // ImuState     16B → 46..61
 
     constexpr uint8_t kOffGimbal  = 0;    // GimbalState   8B → 0..7
     constexpr uint8_t kOffShooter = 8;    // ShooterState  4B → 8..11
+
+    // 偏移必须与结构体长度严格对齐（两端协议改错时在这里直接编译失败）
+    static_assert(kOffComm + sizeof(CommState) == kOffAutoAim,
+                  "CommState 长度与 kOffAutoAim 不一致（改了结构体就要同步改偏移）");
+    static_assert(kOffAutoAim + sizeof(AutoAimState) == kOffImu,
+                  "AutoAimState 长度与 kOffImu 不一致（改了结构体就要同步改偏移）");
 
     /// 一个状态分片的布局描述
     struct StateFrag
@@ -219,7 +235,7 @@ namespace inter_cmd
         return static_cast<uint8_t>((FrameLen(d) + kClassicPayload - 1) / kClassicPayload);
     }
 
-    constexpr uint8_t kUpFrameCount   = FrameCount(Dir::Up);     // 8（61B）
+    constexpr uint8_t kUpFrameCount   = FrameCount(Dir::Up);     // 8（62B）
     constexpr uint8_t kDownFrameCount = FrameCount(Dir::Down);   // 2（12B）
 
     /// 某方向第 i 帧的 CAN ID（占用 StateTxId ~ StateTxId+7 这段）

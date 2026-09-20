@@ -4,13 +4,15 @@
 / {
 	aliases {
 		user-can1    = &can1;
-		remote-uart  = &usart3;
+		inter-can	 = &can2;
+		hipnuc-uart  = &usart1;
+		remote-uart  = &usart6;
 		bmi088-accel = &bmi088_accel;
 		bmi088-gyro  = &bmi088_gyro;
 	};
 	chosen {
-		zephyr,console = &usart6;
-		zephyr,shell-uart = &usart6;
+		zephyr,console = &usart3;
+		zephyr,shell-uart = &usart3;
 	};
 	leds {
 		compatible = "gpio-leds";
@@ -24,7 +26,7 @@
 &usart6 {
 	pinctrl-0 = <&usart6_tx_pg14 &usart6_rx_pg9>;
 	pinctrl-names = "default";
-	current-speed = <115200>;
+	current-speed = <921600>;
 	dmas = <&dma2 6 5 STM32_DMA_PERIPH_TX STM32_DMA_FIFO_FULL>,
 	       <&dma2 1 5 STM32_DMA_PERIPH_RX STM32_DMA_FIFO_FULL>;
 	dma-names = "tx", "rx";
@@ -37,6 +39,16 @@
 	current-speed = <100000>;
 	dmas = <&dma1 1 4 STM32_DMA_PERIPH_RX STM32_DMA_FIFO_FULL>;
 	dma-names = "rx";
+	status = "okay";
+};
+
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pb7>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	dmas = <&dma2 7 4 STM32_DMA_PERIPH_TX STM32_DMA_FIFO_FULL>,
+	       <&dma2 2 4 STM32_DMA_PERIPH_RX STM32_DMA_FIFO_FULL>;
+	dma-names = "tx", "rx";
 	status = "okay";
 };
 

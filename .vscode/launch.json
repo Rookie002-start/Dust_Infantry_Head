@@ -68,10 +68,13 @@
             "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
             "runToEntryPoint": "main",
             "rttConfig": {
-                "enabled": false,
-                "address": "",
+                "enabled": true,
+                "address": "auto",
+                "searchId": "SEGGER RTT",
+                "clearSearch": false,
                 "decoders": [
                     {
+                        "label": "RTT",
                         "port": 0,
                         "type": "console"
                     }
@@ -96,7 +99,20 @@
             ],
             "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
             "toolchainPrefix": "arm-zephyr-eabi",
-            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd"
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
+            "rttConfig": {
+                "enabled": true,
+                "address": "auto",
+                "searchId": "SEGGER RTT",
+                "clearSearch": false,
+                "decoders": [
+                    {
+                        "label": "RTT",
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            }
         },
         {
             "name": "Debug (OpenOCD + ST-Link)",
@@ -118,10 +134,13 @@
             "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
             "runToEntryPoint": "main",
             "rttConfig": {
-                "enabled": false,
-                "address": "",
+                "enabled": true,
+                "address": "auto",
+                "searchId": "SEGGER RTT",
+                "clearSearch": false,
                 "decoders": [
                     {
+                        "label": "RTT",
                         "port": 0,
                         "type": "console"
                     }
@@ -145,7 +164,20 @@
             ],
             "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
             "toolchainPrefix": "arm-zephyr-eabi",
-            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd"
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
+            "rttConfig": {
+                "enabled": true,
+                "address": "auto",
+                "searchId": "SEGGER RTT",
+                "clearSearch": false,
+                "decoders": [
+                    {
+                        "label": "RTT",
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            }
         },
         {
             "name": "Debug (OpenOCD + J-Link JTAG)",
@@ -167,10 +199,13 @@
             "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
             "runToEntryPoint": "main",
             "rttConfig": {
-                "enabled": false,
-                "address": "",
+                "enabled": true,
+                "address": "auto",
+                "searchId": "SEGGER RTT",
+                "clearSearch": false,
                 "decoders": [
                     {
+                        "label": "RTT",
                         "port": 0,
                         "type": "console"
                     }
@@ -194,7 +229,20 @@
             ],
             "gdbPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
             "toolchainPrefix": "arm-zephyr-eabi",
-            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd"
+            "svdFile": "${workspaceRoot}/build/zephyr/zephyr.svd",
+            "rttConfig": {
+                "enabled": true,
+                "address": "auto",
+                "searchId": "SEGGER RTT",
+                "clearSearch": false,
+                "decoders": [
+                    {
+                        "label": "RTT",
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            }
         }
     ]
 }

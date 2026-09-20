@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# 本工程自带的 SEGGER RTT 模块。
+#
+# 名字故意取作 "segger"（与上游 zephyrproject-rtos/segger 模块同名），
+# 因为 cmake-ext / kconfig-ext 为 true 时，Zephyr 会使用自己仓库里已存在的
+# 构建胶水：
+#     $ZEPHYR_BASE/modules/segger/CMakeLists.txt
+#     $ZEPHYR_BASE/modules/segger/Kconfig
+#     $ZEPHYR_BASE/modules/segger/SEGGER_RTT_zephyr.c
+#     $ZEPHYR_BASE/modules/segger/segger_rtt.ld
+# 于是 CONFIG_USE_SEGGER_RTT / CONFIG_LOG_BACKEND_RTT / CONFIG_RTT_CONSOLE
+# 等标准 Kconfig 全部可用；本模块只负责提供上游模块里的
+#     SEGGER/    —— SEGGER RTT 源码
+#     Config/    —— Zephyr 版 RTT 配置头
+#
+# 这样做的原因：这台机器上的 west 工作区没有拉取 modules/debug/segger，
+# 详见 modules/segger/README.md。
+name: segger
+build:
+  cmake-ext: true
+  kconfig-ext: true

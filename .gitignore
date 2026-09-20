@@ -1,6 +1,9 @@
 # 构建产物
 build/
 
+# python 缓存（tools/ 下的脚本）
+__pycache__/
+
 # 沙箱/工具生成的占位目录
 .agents/
 .codex/

@@ -19,6 +19,9 @@ list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}/dts")
 set(ZEPHYR_EXTRA_MODULES
   "${FW_ROOT}"
   "${ZEPHYR_USER_DIR}/platform/cmsis"
+  # 工程自带的 SEGGER RTT 模块（SEGGER 源码 + Zephyr 版配置头），
+  # 构建/链接胶水直接复用 $ZEPHYR_BASE/modules/segger 里 Zephyr 自带的那份
+  "${CMAKE_CURRENT_SOURCE_DIR}/modules/segger"
 )
 set(ZEPHYR_SDK_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../zephyr-sdk-1.0.1" CACHE PATH "")
 
@@ -54,6 +57,20 @@ foreach(_dir IN LISTS BOARD_GLOBAL_INCLUDES)
   zephyr_include_directories(${_dir})
 endforeach()
 target_compile_options(app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>)
+
+# ---- (6.1) SEGGER RTT：补上 printf API 与头文件路径 -------------------------
+# SEGGER_RTT.c / SEGGER_RTT_zephyr.c 由 Zephyr 自带的模块胶水编译，
+# 但 SEGGER_RTT_printf() 不在其中，这里单独加进来，方便业务代码打变量：
+#     SEGGER_RTT_printf(0, "imu: %d %d %d\n", x, y, z);
+if(CONFIG_USE_SEGGER_RTT)
+  target_sources(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/segger/SEGGER/SEGGER_RTT_printf.c
+  )
+  target_include_directories(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/segger/SEGGER
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/segger/Config
+  )
+endif()
 
 # ---- (7) 装配架构层各层（门禁打开时 add_subdirectory）----------------------
 if(CONFIG_${CONFIG_SYM})
