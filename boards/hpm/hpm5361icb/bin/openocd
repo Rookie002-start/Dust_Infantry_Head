@@ -1,0 +1,7 @@
+#!/bin/bash
+# 垫片：让 sdk_glue_user/boards/hpmicro/hpm5361icb/board.cmake 里的
+#   find_program(OPENOCD openocd PATHS ${ZPATH} NO_DEFAULT_PATH)
+# 从 PATH 最前面找到本目录，从而走 CMSIS-DAP wrapper。
+# 详见 ../board.cmake 与 ../openocd-cmsis-dap-wrapper.sh。
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec "${HERE}/../openocd-cmsis-dap-wrapper.sh" "$@"

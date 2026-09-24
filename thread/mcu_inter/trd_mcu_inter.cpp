@@ -7,16 +7,23 @@
  *             · ImuState  ← pub_imu_to（框架 IMU 模块）
  *             · CommState ← pub_remote_to（遥控，归一化 → 指令）
  *          ② 入队（push）：只给对端用、本地没人消费的量 → PostFrame 走 k_msgq（如 AutoAimState）
- *        - 两个来源都写进同一份【本线程私有】分片缓存，按 Dir::Up 布局聚合成 62B 聚合帧
+ *        - 两个来源都写进同一份【本线程私有】分片缓存，按 Dir::Up 布局聚合成 63B 聚合帧
  *        - 整帧一次发出（CAN FD，FDF + BRS），周期发出
+ *
+ * ⚠️ 自瞄分片（AutoAimState）来自**上板 PC 链路线程**（thread/pc）：PC 掉线后没有
+ *    人会再刷新它，所以这里按"分片年龄"判活（kVisionTimeoutMs）——超时就把
+ *    CommState.flags 的 VisionOk/VisionFire 清零（帧里保留最后的角度，下板按位忽略），
+ *    下板据此回手动瞄准；恢复时自动重新置位，不需要握手。
+ *    kVisionTimeoutMs 必须与 thread/pc 的 kLinkTimeoutMs 一致，否则会出现
+ *    "上游还在发、下游已经判失效"或反过来的错配。
  *
  * ⚠️ 本线程是 user-can2 总线的所有者：初始化与收帧分发入口都在这里。
  *    接收侧（thread/inter_rx）只注册 CAN_RX_HANDLER，**不要**再次 Can::Init() /
  *    SetRxCallback()，否则会重复注册过滤器并覆盖分发入口。
  *
  * ⚠️ 总线带宽（CAN FD：仲裁段 1Mbps / 数据段 2Mbps，FDF + BRS）：
- *    本方向 62B 一帧 ≈ 0.34ms，对端 12B 一帧 ≈ 0.12ms，一轮合计 ≈ 0.46ms
- *    → 1ms 周期约占 46%，可行。总线忙时靠 Can::Send 的超时等待空 TX 缓冲区，不直接丢帧。
+ *    本方向 63B 一帧 ≈ 0.35ms，对端 12B 一帧 ≈ 0.12ms，一轮合计 ≈ 0.47ms
+ *    → 1ms 周期约占 47%，可行。总线忙时靠 Can::Send 的超时等待空 TX 缓冲区，不直接丢帧。
  *
  * @version 0.6
  * @date 2026-09-15
@@ -30,6 +37,7 @@
 #include "Init_entry.hpp"
 #include "to_mcu_tx.hpp"
 #include "inter_cmd.hpp"
+#include "trd_inter_bus.hpp"  // 总线所有者（Init 在里面，本线程只当使用者）
 #include "imu_to.hpp"         // pull 来源：IMU 通道
 #include "remote_to.hpp"      // pull 来源：遥控通道
 #include "can.hpp"
@@ -43,15 +51,26 @@ LOG_MODULE_REGISTER(mcu_inter, LOG_LEVEL_INF);
 namespace thread::mcu_inter
 {
     static Thread<2048> thread_{};
-    static Can mcu_inter_can{};
-
     static constexpr inter_cmd::Dir kDir       = inter_cmd::Dir::Up;     // 本线程发送方向
     static constexpr uint8_t        kFrameSize = 64;                     // 聚合帧缓冲上限
-    static constexpr uint8_t        kStateLen  = inter_cmd::FrameLen(kDir);    // 61
+    static constexpr uint8_t        kStateLen  = inter_cmd::FrameLen(kDir);    // 63
     static constexpr uint32_t       kPeriodMs  = 1;                      // FD 整帧，见文件头带宽说明
 
+    /// 自瞄分片在本方向契约表里的下标（-1 = 本方向没有该分片）
+    constexpr int AutoAimSlotIndex()
+    {
+        for (uint8_t i = 0; i < inter_cmd::kStateFragCount; ++i) {
+            if (inter_cmd::kStateFrags[i].dir == kDir &&
+                inter_cmd::kStateFrags[i].type == inter_cmd::FrameType::StateAutoAim) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+    static constexpr int kAutoAimSlot = AutoAimSlotIndex();
+
     // ---- 发送等待时间 ----
-    // 等空 TX 缓冲区再发，避免总线被占满时直接丢帧（一条 62B FD 帧 ≈ 0.34ms）
+    // 等空 TX 缓冲区再发，避免总线被占满时直接丢帧（一条 63B FD 帧 ≈ 0.35ms）
     static constexpr uint32_t kTxTimeoutMs = 2;
 
     // ---- 私有分片缓存：按契约布局表下标索引（本线程独有，不共享 → 无需锁）----
@@ -60,11 +79,14 @@ namespace thread::mcu_inter
         uint8_t data[kFrameSize];
         uint8_t len;
         bool    valid;
+        uint32_t stamp_ms;      // 本分片最后一次更新的时刻（判"分片年龄"用）
+        uint8_t flags;          // 生产者随分片带来的标志位（= CommState.flags 位定义）
     };
     static Slot slots[inter_cmd::kStateFragCount] {};
 
     /// 更新本方向的分片缓存
-    static void UpdateSlot(inter_cmd::FrameType type, const uint8_t *data, uint8_t len)
+    static void UpdateSlot(inter_cmd::FrameType type, const uint8_t *data, uint8_t len,
+                           uint8_t flags = 0)
     {
         for (uint8_t i = 0; i < inter_cmd::kStateFragCount; ++i)
         {
@@ -78,6 +100,8 @@ namespace thread::mcu_inter
             memcpy(slots[i].data, data, len);
             slots[i].len   = len;
             slots[i].valid = true;
+            slots[i].flags = flags;
+            slots[i].stamp_ms = k_uptime_get_32();
             return;
         }
         LOG_WRN("not my direction/type: 0x%02x", static_cast<uint8_t>(type));
@@ -120,7 +144,7 @@ namespace thread::mcu_inter
         tx.flags = CAN_FRAME_FDF | CAN_FRAME_BRS;   // FD 帧 + 数据段 2Mbps
         tx.dlc   = can_bytes_to_dlc(len);
         memcpy(tx.data, buf, len);
-        if (!mcu_inter_can.Send(&tx, K_MSEC(kTxTimeoutMs))) {
+        if (!inter_bus::Bus().Send(&tx, K_MSEC(kTxTimeoutMs))) {
             // 等不到空 TX 缓冲区（总线被占满 / 控制器没起来）：限流记录，别刷屏
             static int64_t last_warn_ms = 0;
             const int64_t now = k_uptime_get();
@@ -147,6 +171,9 @@ namespace thread::mcu_inter
     /// 数据源新鲜度阈值：超过这么久没有新样本就认为该源掉了
     /// （遥控模块自己的超时是 100ms，取同一个量级）
     static constexpr uint32_t kSourceTimeoutMs = 100;
+
+    /// 自瞄分片（PC 链路）新鲜度阈值：必须与 thread/pc 的 kLinkTimeoutMs 一致
+    static constexpr uint32_t kVisionTimeoutMs = 100;
 
     /// 本线程私有的"最新上板指令"：指令字段只在读到新遥控数据时更新，
     /// flags 每周期都按当前数据源状态刷新（遥控一直没连上时也要如实反映 IMU 状态）
@@ -208,12 +235,49 @@ namespace thread::mcu_inter
             comm_state.chassis_vy   = r.chassisy;
             comm_state.chassis_rot  = 0.0f;                          // TODO: remote_to 无自转量，来源待定
             comm_state.chassis_spin = static_cast<uint8_t>(r.chassis_mode);   // 与 SpinMode 一一对应
+
+            // ---- CommState.Switch：开关状态位（遥控透传，下板还要配合 CommLinkOk() 判活）----
+            const bool stopped = (r.chassis_mode == topic::remote_to::ChassisMode::Stop);
+            comm_state.Switch.Supercap = (r.supercap_ctrl == topic::remote_to::StartMode::On) ? 1 : 0;
+            comm_state.Switch.AutoAim  = (r.autoaim_ctrl  == topic::remote_to::StartMode::On) ? 1 : 0;
+            // 发射机构状态：摩擦轮开关开着、且没有踩失能位才算"已启动"
+            comm_state.Switch.Booster_Status =
+                ((r.shoot_ctrl == topic::remote_to::StartMode::On) && !stopped) ? 1 : 0;
+            // TODO(来源待定)：遥控契约里还没有归零/快跑/刷新 UI 的按键，先固定 0
+            comm_state.Switch.Gimbal_SetZero = 0;
+            comm_state.Switch.Fast_Run       = 0;
+            comm_state.Switch.Refresh_UI     = 0;
         }
 
         // 每周期都刷新标志位并写分片：遥控没连上时 CommState 就是"全 0 + 无 LinkOk"的失效指令
         // （下板据此停车），IMU 位则如实反映 IMU 新鲜度，不受遥控在不在线影响。
+        // 自瞄位来自 PC 链路（push 分片）：按分片年龄判活，PC 掉线后自动清零 → 下板回手动。
+        uint8_t vision_bits = 0;
+        if (kAutoAimSlot >= 0)
+        {
+            const Slot &s = slots[kAutoAimSlot];
+            const bool fresh = s.valid &&
+                ((now - s.stamp_ms) <= static_cast<int64_t>(kVisionTimeoutMs));
+            if (fresh) {
+                vision_bits = static_cast<uint8_t>(s.flags &
+                                                   (inter_cmd::kCommFlagVisionOk |
+                                                    inter_cmd::kCommFlagVisionFire));
+            }
+
+            // 只在"自瞄数据可用 ↔ 失效/无开火"的沿上打日志（1ms 周期不能刷屏）
+            static bool vision_logged_ok = false;
+            const bool vision_ok = (vision_bits & inter_cmd::kCommFlagVisionOk) != 0u;
+            if (vision_ok != vision_logged_ok) {
+                vision_logged_ok = vision_ok;
+                LOG_INF("PC auto-aim %s (fire=%u)",
+                        vision_ok ? "online" : "stale/idle",
+                        (vision_bits & inter_cmd::kCommFlagVisionFire) ? 1u : 0u);
+            }
+        }
+
         comm_state.flags = static_cast<uint8_t>((link_ok ? inter_cmd::kCommFlagLinkOk : 0u) |
-                                                (imu_ok  ? inter_cmd::kCommFlagImuOk  : 0u));
+                                                (imu_ok  ? inter_cmd::kCommFlagImuOk  : 0u) |
+                                                vision_bits);
         UpdateSlot(inter_cmd::FrameType::StateComm,
                    reinterpret_cast<const uint8_t *>(&comm_state), sizeof(comm_state));
     }
@@ -231,7 +295,7 @@ namespace thread::mcu_inter
             topic::to_mcu_tx::Message ev{};
             while (k_msgq_get(&user_can2_msgq, &ev, K_NO_WAIT) == 0)
             {
-                UpdateSlot(static_cast<inter_cmd::FrameType>(ev.tag), ev.data, ev.len);
+                UpdateSlot(static_cast<inter_cmd::FrameType>(ev.tag), ev.data, ev.len, ev.flags);
             }
 
             // 3) 聚合本方向状态帧 → 拆帧发出
@@ -251,24 +315,9 @@ namespace thread::mcu_inter
 
     bool thread_init()
     {
-        const device *dev = DEVICE_DT_GET(DT_ALIAS(inter_can));
-        if (!device_is_ready(dev)) {
-            LOG_ERR("inter_can not ready");
-            return false;
-        }
-
-        // CAN FD：必须进 FD 模式（FDOE/BRSE），否则发不出 FD 帧
-        const can_filter filter{.id = 0, .mask = 0, .flags = 0};
-        if (!mcu_inter_can.Init(dev, filter, CAN_MODE_FD)) {
-            LOG_ERR("mcu_inter_can init fail");
-            return false;
-        }
-        // 收帧分发入口：接收侧（thread/inter_rx）的 CAN_RX_HANDLER 依赖它
-        mcu_inter_can.SetRxCallback(user_can2_rx_callback);
-
         // 发送结果回调：error==0 → 帧上了总线且被对端 ACK；否则 -EIO/-EBUSY/-ENETUNREACH。
         // 回调在中断上下文里跑，所以只在出错时限流打一条，正常情况完全静默。
-        mcu_inter_can.SetTxCallback([](const device *, int error, void *) {
+        inter_bus::Bus().SetTxCallback([](const device *, int error, void *) {
             if (error == 0) {
                 return;
             }

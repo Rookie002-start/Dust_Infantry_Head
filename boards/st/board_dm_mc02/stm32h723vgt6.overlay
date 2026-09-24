@@ -6,10 +6,10 @@
 / {
 	aliases {
 		user-can1    = &fdcan1;
-		user-can2	 = &fdcan2;
 		inter-can    = &fdcan2;
-		hipnuc-uart  = &usart1;      /* IMU：HiPNUC（115200，与 C 板 usart1 一致） */
-		remote-uart  = &uart7;       /* 遥控接收机（921600） */
+		user-can3    = &fdcan3;
+		hipnuc-uart  = &usart1;
+		remote-uart  = &uart7;
 		debug-uart	 = &usart3;
 		bmi088-accel = &bmi088_accel;
 		bmi088-gyro  = &bmi088_gyro;
@@ -109,6 +109,15 @@
 	sample-point = <800>;
 	bitrate-data = <2000000>;
 	sample-point-data = <750>;
+	status = "okay";
+};
+
+/* 发射机构总线：DJI 电调走经典 CAN（1 Mbps），不用 FD 数据段 */
+&fdcan3 {
+	pinctrl-0 = <&fdcan3_rx_pd12 &fdcan3_tx_pd13>;
+	pinctrl-names = "default";
+	bitrate = <1000000>;
+	sample-point = <800>;
 	status = "okay";
 };
 

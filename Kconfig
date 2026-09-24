@@ -53,24 +53,34 @@ config TRD_MCU_INTER
     bool "MCU upper/lower board FDCAN thread"
     default n
     select DUST_COM_CAN
+    select TRD_INTER_BUS
     select DUST_TPC_TO_MCU_TX
     select DUST_TPC_IMU_TO
     select DUST_TPC_REMOTE_TO
     select INTER_CMD
     help
-      Enable the upper/lower board communication thread 
-      Note: 依赖设备树别名 user-can2，仅在有该总线的板卡上开启
-            （dm_mc02 的板级 conf 里已打开）。
+      上板 → 下板发送线程。总线初始化由 TRD_INTER_BUS 负责（不再绑在发送线程上）。
+      Note: 依赖设备树别名 inter-can。
 
 config TRD_INTER_RX
     bool "Inter-board RX thread (from lower board)"
     default n
     select DUST_COM_CAN
+    select TRD_INTER_BUS
     select DUST_TPC_FROM_BODY
     select INTER_CMD
     help
       上板 ← 下板接收线程：解析 Dir::Down 聚合状态帧（0x200）+ 超时判定 → zbus 发布。
-      总线由 TRD_MCU_INTER 持有并初始化，本项只注册 CAN_RX_HANDLER。
+      本项只注册 CAN_RX_HANDLER，总线初始化由 TRD_INTER_BUS 负责。
+
+config TRD_INTER_BUS
+    bool "Inter-board CAN bus owner (init only, no thread)"
+    default n
+    select DUST_COM_CAN
+    help
+      上下板通信总线所有者：只做 Can::Init(..., CAN_MODE_FD) + SetRxCallback，不建线程。
+      由 TRD_MCU_INTER / TRD_INTER_RX 自动 select；也可单独打开用于
+      "只调接收" / "只调发送"的调试场景。依赖设备树别名 inter-can。
 
 config TRD_TEST
     bool "TEST thread task"
@@ -85,6 +95,29 @@ config TRD_REMOTE
     select DUST_MOD_DEV_REMOTE_VT13
     help
       Enable the REMOTE thread.
+
+config TRD_BOOSTER
+    bool "BOOSTER thread task"
+    default n
+    select DUST_COM_CAN
+    select DUST_CTL_PID
+    select DUST_MOD_DEV_MOTOR_DJI
+    select DUST_MOD_DEV_REMOTE
+    select DUST_TPC_TO_CAN_TX
+    help
+      Enable the BOOSTER thread.
+      发射机构线程：摩擦轮升速 + 拨弹盘进弹
+
+
+config TRD_PC
+    bool "PC (auto-aim) link thread"
+    default n
+    select DUST_COM_USB
+    select DUST_TPC_IMU_TO
+    select INTER_CMD
+    help
+      Enable the PC auto-aim link thread（USB CDC ACM）
+
 
 config TRD_IMU
     bool "IMU thread task"

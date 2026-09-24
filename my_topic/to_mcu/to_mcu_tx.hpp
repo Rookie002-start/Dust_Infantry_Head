@@ -25,5 +25,9 @@ namespace topic::to_mcu_tx
         uint8_t  tag;        // 分片类型标签（= inter_cmd::FrameType，非上线 CAN ID）
         uint8_t  data[64];   // 载荷（CAN FD 最大 64 字节）
         uint8_t  len;        // 实际有效字节数
+        /// 随分片搬运的同板内标志位（= inter_cmd::CommState.flags 位定义）。
+        /// 发送线程聚合时把它并进 CommState.flags：不占上线字节，但下板判活要用的
+        /// "PC 自瞄链路有效/开火请求"这类位靠它从生产者（thread/pc）传到聚合方。
+        uint8_t  flags;
     };
 }

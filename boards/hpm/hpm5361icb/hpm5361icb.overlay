@@ -6,6 +6,10 @@
 / {
     aliases {
         user-can1   = &mcan0;
+        user-can2   = &mcan1;
+        inter-can   = &mcan1;      /* 上下板通信总线（总线所有者组件用；与 user-can2 同一节点） */
+        user-can3   = &mcan2;
+        user-can4   = &mcan3;
         remote-uart = &uart4;
         hipnuc-uart = &uart3;
         imu-spi     = &icm42688p;
@@ -80,6 +84,102 @@
      *   → prescaler=1, tq=24, seg1=18, seg2=6 → 精确 1.000 Mbps，采样点 75% */
     // clk-source = <CLK_SRC_OSC24M>;
     // clk-divider = <1>;
+    bitrate = <1000000>;
+    status = "okay";
+};
+
+/* ---- MCAN1 / MCAN2 / MCAN3 -------------------------------------------
+ * SoC 级 dtsi（hpm53xx.dtsi）只声明了 mcan0，这三个按同样的写法补上：
+ *   mcan1  0xF0284000  IRQ 36      mcan2  0xF0288000  IRQ 37      mcan3  0xF028C000  IRQ 38
+ * 引脚（按原理图）：
+ *   can1 = PB05(MCAN1_TXD) / PB04(MCAN1_RXD)
+ *   can2 = PY00(MCAN2_TXD) / PY01(MCAN2_RXD)
+ *   can3 = PY05(MCAN3_TXD) / PY04(MCAN3_RXD)
+ * 时钟用 OSC24M/1：24MHz ÷ 1Mbps = 24 tq，位时序精确。
+ */
+&{/soc} {
+    mcan1: can@f0284000 {
+        compatible = "hpmicro,hpm-mcan";
+        reg = <0xf0284000 0x4000>;
+        interrupts = <36 1>;
+        interrupt-parent = <&plic>;
+        clk-name = <CLOCK_CAN1>;
+        clk-source = <CLK_SRC_OSC24M>;
+        clk-divider = <1>;
+        status = "disabled";
+    };
+
+    mcan2: can@f0288000 {
+        compatible = "hpmicro,hpm-mcan";
+        reg = <0xf0288000 0x4000>;
+        interrupts = <37 1>;
+        interrupt-parent = <&plic>;
+        clk-name = <CLOCK_CAN2>;
+        clk-source = <CLK_SRC_OSC24M>;
+        clk-divider = <1>;
+        status = "disabled";
+    };
+
+    mcan3: can@f028c000 {
+        compatible = "hpmicro,hpm-mcan";
+        reg = <0xf028c000 0x4000>;
+        interrupts = <38 1>;
+        interrupt-parent = <&plic>;
+        clk-name = <CLOCK_CAN3>;
+        clk-source = <CLK_SRC_OSC24M>;
+        clk-divider = <1>;
+        status = "disabled";
+    };
+};
+
+/* PY 口做复用要先让 PIOC 把控制权交给 IOC（PIOC ALT=3），再用 IOC 的 ALT7 选 MCAN 功能 */
+&pinctrl {
+    pinmux_mcan2_txrx: pinmux_mcan2_txrx {
+        group0 {
+            /* PIOC ALT=3: hand control to IOC */
+            pinmux = <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 0), IOC_TYPE_PIOC, 0, 3)>,
+                     <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 1), IOC_TYPE_PIOC, 0, 3)>;
+        };
+        group1 {
+            /* IOC ALT=7: MCAN2_TXD(PY00) / MCAN2_RXD(PY01) */
+            pinmux = <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 0), IOC_TYPE_IOC, 0, 7)>,
+                     <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 1), IOC_TYPE_IOC, 0, 7)>;
+            input-enable;
+        };
+    };
+
+    pinmux_mcan3_txrx: pinmux_mcan3_txrx {
+        group0 {
+            /* PIOC ALT=3: hand control to IOC */
+            pinmux = <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 4), IOC_TYPE_PIOC, 0, 3)>,
+                     <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 5), IOC_TYPE_PIOC, 0, 3)>;
+        };
+        group1 {
+            /* IOC ALT=7: MCAN3_RXD(PY04) / MCAN3_TXD(PY05) */
+            pinmux = <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 4), IOC_TYPE_IOC, 0, 7)>,
+                     <HPMICRO_PINMUX(HPMICRO_PIN(HPMICRO_PORTY, 5), IOC_TYPE_IOC, 0, 7)>;
+            input-enable;
+        };
+    };
+};
+
+&mcan1 {
+    pinctrl-0 = <&pinmux_mcan1_txrx>;
+    pinctrl-names = "default";
+    bitrate = <1000000>;
+    status = "okay";
+};
+
+&mcan2 {
+    pinctrl-0 = <&pinmux_mcan2_txrx>;
+    pinctrl-names = "default";
+    bitrate = <1000000>;
+    status = "okay";
+};
+
+&mcan3 {
+    pinctrl-0 = <&pinmux_mcan3_txrx>;
+    pinctrl-names = "default";
     bitrate = <1000000>;
     status = "okay";
 };

@@ -48,10 +48,34 @@ if(CONFIG_TRD_INTER_RX)
 	)
 endif()
 
+if(CONFIG_TRD_INTER_BUS)
+	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inter_bus/trd_inter_bus.cpp)
+	target_include_directories(app PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/inter_bus
+	)
+endif()
+
 if(CONFIG_TRD_IMU)
 	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/imu/trd_imu.cpp)
 	target_include_directories(app PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/imu
+	)
+endif()
+
+if(CONFIG_TRD_BOOSTER)
+	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/booster/trd_booster.cpp)
+	target_include_directories(app PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/booster
+	)
+endif()
+
+if(CONFIG_TRD_PC)
+	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/pc/trd_pc.cpp)
+	target_include_directories(app PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/pc
 	)
 endif()

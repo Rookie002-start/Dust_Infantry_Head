@@ -49,8 +49,15 @@ static void Task(void*, void*, void*)
 
         user_can1.Send(&tx);
 
+        printk("send");
+
         k_msleep(200);
     }
+}
+
+void my_rxcallback(struct can_frame &frame, void *)
+{
+    printk("rxcallback");
 }
 
 bool thread_init()
@@ -64,6 +71,7 @@ bool thread_init()
         const can_filter filter { .id = 0, .mask = 0, .flags = 0 };
         user_can1.Init(dev, filter);
         user_can1.SetRxCallback(user_can1_rx_callback);
+        // user_can1.SetRxCallback(my_rxcallback);
         LOG_INF("user_can1 ready");
     }
     return true;
