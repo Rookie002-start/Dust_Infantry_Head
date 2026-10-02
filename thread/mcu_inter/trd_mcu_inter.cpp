@@ -1,6 +1,6 @@
 /**
  * @file trd_mcu_inter.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 上板 → 下板发送线程（CAN FD 整帧）
  *        - 三个分片全部从 zbus 通道拉取最新值 → RefreshFromChannels()
  *            · ImuState     ← pub_imu_to（框架 IMU 模块）

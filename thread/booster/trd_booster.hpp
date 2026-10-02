@@ -1,6 +1,6 @@
 /**
  * @file trd_booster.hpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 发射机构实例集合：电机对象 / 速度环 PID / CAN ID 表 / TX 队列
  * @version 1.0
  * @date 2026-09-21

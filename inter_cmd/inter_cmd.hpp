@@ -1,6 +1,6 @@
 /**
  * @file inter_cmd.hpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 上下板通信接口契约（共享：任意业务线程发数据都走这里）
  *
  * 传输：**CAN FD 整帧**（FDF + BRS，数据段 2Mbps，DLC = can_bytes_to_dlc(帧长)）

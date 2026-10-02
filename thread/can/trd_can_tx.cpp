@@ -1,6 +1,6 @@
 /**
  * @file trd_can_tx.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief
  * @version 0.1
  * @date 2026-04-30

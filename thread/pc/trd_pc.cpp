@@ -1,6 +1,6 @@
 /**
  * @file trd_pc.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief PC（自瞄）链路线程 — USB CDC ACM 单一 owner：收 PC 自瞄数据发 zbus + 发 IMU 数据给 PC
  * @version 1.0
  * @date 2026-09-23

@@ -1,6 +1,6 @@
 /**
  * @file thread.hpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief Zephyr 线程模板，封装线程创建、启动等样板代码
  * @version 0.1
  * @date 2026-04-12

@@ -1,6 +1,6 @@
 /**
  * @file from_body.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 下板→上板接收数据契约定义
  * @version 0.1
  * @date 2026-09-14

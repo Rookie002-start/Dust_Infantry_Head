@@ -1,6 +1,6 @@
 /**
  * @file from_body.hpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 下板→上板接收数据契约（topic 层：只定义结构体与通道，不含业务逻辑）
  *
  * 状态通道（zbus pub_from_body）：level 语义，保留最新值，供多个消费者各自读取。

@@ -1,6 +1,6 @@
 /**
  * @file trd_inter_rx.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 下板→上板接收线程（经典 CAN 拆帧）
  *        - 2 个分片帧（0x200 / 0x201）在回调里按固定偏移拼进聚合帧缓冲
  *        - 线程按发送周期读一份一致快照 → 解析 + 超时判定 → 发布 zbus

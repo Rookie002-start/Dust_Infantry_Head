@@ -1,6 +1,6 @@
 /**
  * @file pc_protocol.hpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 上板 ↔ PC（自瞄）链路线缆协议：结构体 / 帧长 / CRC16
  * @version 1.0
  * @date 2026-09-23

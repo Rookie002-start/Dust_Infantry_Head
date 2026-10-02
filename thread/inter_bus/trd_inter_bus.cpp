@@ -1,6 +1,6 @@
 /**
  * @file trd_inter_bus.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 上下板通信总线所有者实现（无 REGISTER_THREAD，只有 REGISTER_INIT）
  * @version 0.1
  * @date 2026-09-24

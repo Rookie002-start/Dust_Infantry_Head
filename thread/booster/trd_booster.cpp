@@ -1,6 +1,6 @@
 /**
  * @file trd_booster.cpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 发射机构控制线程 — 1ms 固定周期：遥控指令 → 摩擦轮升速 / 拨弹盘进弹 → 电流帧
  * @version 1.0
  * @date 2026-09-21

@@ -1,6 +1,6 @@
 /**
  * @file trd_inter_bus.hpp
- * @author qingyu
+ * @author Rookie002-start
  * @brief 上下板通信总线所有者（不建线程）—— 供发送/接收线程共用
  * @version 0.1
  * @date 2026-09-24
