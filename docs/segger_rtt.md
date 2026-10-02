@@ -181,3 +181,41 @@ OpenOCD 的 `-c` 命令一旦返回错误，它就会**直接退出**。典型�
 以后如果 `west update` 拉到了官方 `segger` 模块，注意**不要**和本目录同时存在
 （同名模块会冲突）：删掉 `modules/segger/` 和那行 `ZEPHYR_EXTRA_MODULES` 即可，
 `prj.conf` / `Kconfig` 配置全部不用改。
+
+## 8. HPM5361（RISC-V）专用说明
+
+固件侧完全一样（`boards/hpm/hpm5361icb/hpm5361icb.conf` 里 `CONFIG_DEBUG_RTT=y`），
+**但主机侧不能用 OpenOCD 的 RTT**，原因实测确认：
+
+1. OpenOCD 的「目标侧 RTT」（`rtt setup` / `rtt start`）**只对 ARM 目标注册**；
+   在 HPM 上 `init` 之后 `help rtt` 也只有 `rtt server`，没有 setup/start。
+2. 本机 OpenOCD 在 HPM5361 上**运行中读不了内存**：`sysbus` / `abstract` / `progbuf`
+   三种访问方式都报 `Failed to read priv register`，必须 `halt` 才能读。
+   （调试模块本身支持 SBA：`dmstatus=0x430ca2`，`sbvers=2`，是 OpenOCD 的 RISC-V 路径限制。）
+
+所以 HPM 走 **`tools/rtt_hpm.py`**：按 SEGGER RTT 协议自己读控制块和环形缓冲，
+节拍是 `halt → 读缓冲 → 回写 RdOff → resume`（默认 200ms 一次，每轮最多读 512 字节）。
+控制块地址（`_SEGGER_RTT`）直接从 ELF 里取，RISC-V 上它落在普通 `.bss`（没有 `.rtt_buff_data` 段）。
+
+```bash
+west build -d build            # 板级 conf 已开 CONFIG_DEBUG_RTT
+./flash.sh                     # 烧录（走 CMSIS-DAP wrapper）
+
+tools/rtt.sh                   # 终端 A：拉起 OpenOCD（telnet 4444），保持不退
+tools/rtt_hpm.py -e build/zephyr/zephyr.elf   # 终端 B：读日志（Ctrl-C 退出）
+#   tools/rtt_hpm.py --once    # 只看控制块信息，排查"固件里到底有没有 RTT"
+#   tools/rtt_hpm.py --poll-ms 500   # 觉得 halt 太频繁就把周期调大
+```
+
+注意事项：
+
+* **每轮 `halt` 期间 CPU 是停的**，实测读取速度只有 2~3.4 KiB/s（`dump_image`，`mdb` 更慢），
+  所以"持续读取"会占掉固件 10%+ 的时间，表现为 CAN TX 缓冲区满 / USB 丢包变多。
+  默认 `--poll-ms 5000`（约 13 s 积压才开始丢），调试时也可以只在需要时开一下、看完就 Ctrl-C；
+  要"零打扰"就得用 J-Link（见下）；
+* 日志量超过 4KB 缓冲而没及时读，会提示 `缓冲区被覆盖，丢了 N 字节`；
+* **探针假死**（`CMSIS-DAP command CMD_INFO failed`）：跑一次
+  `sudo /usr/local/sbin/hpm-probe-usb reset` 即可恢复（烧录用的 wrapper 会自己做，但它
+  的 USB 复位动作对"频繁起停的 RTT 会话"并不友好，所以 RTT 脚本默认直连 OpenOCD，
+  需要时可 `-i dap-cmsis-wrapper` 强制走 wrapper）；
+* 如果手上有 J-Link 并装了 SEGGER 软件，`JLinkRTTViewer` 是更正规的方案（本机未安装）。

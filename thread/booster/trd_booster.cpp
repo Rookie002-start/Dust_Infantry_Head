@@ -15,13 +15,27 @@
  *
  * 三个电调共用控制帧 0x200（DJI 协议：反馈 0x20n ↔ 控制帧第 n-1 槽），所以一拍只发一帧。
  *
+ * ## 弹丸计数（外部中断）
+ *
+ * 弹丸检测引脚（overlay 里 `/zephyr,user` 的 `booster-shoot-irq-gpios`，PA18，上升沿有效）接 GPIO 中断：
+ * **一簇密集的上升沿（≥kShootIrqClusterMin 根、间隔 ≤kShootIrqClusterMs）= 一发弹丸通过**
+ * （`instance::booster::shot_count` +1）：零散单根沿当干扰丢掉，距上一发不足"当前并窗"的
+ * 密簇（同一发的余振）并进前一发。并窗 = 实测射速间隔 − 余量、夹在 [min,max] 内，
+ * 也就是**自适应**的。判据的实测依据见 kShootIrqClusterMs 上方的说明。
+ * 中断里只做一次 atomic 自增，控制环不介入；PC 链路线程把它填进自瞄上行包的 bullet_count。
+ *
  * ## 控制数据语义（topic::remote_to，本线程轮询读取）
  *
  * | 字段 | 语义 | 本线程行为 |
  * |------|------|-----------|
- * | `reload_ctrl` | **开火** | 按住进弹，按 kShotIntervalMs 限流；松开立即停 |
- * | `shoot_ctrl`  | **开摩擦轮** | 开 → 摩擦轮升速到 kFrictionOmega 并闭环稳住 |
- * | `stop`        | **失能状态位** | 置位 → 整机构失能：三台电机零电流 + 清 PID 积分 + 拨弹节拍复位 |
+ * | `shoot_ctrl`    | **开火** | 按住进弹（需摩擦轮 READY），松开立即停；自瞄开火同样触发 |
+ * | `autoaim_ctrl`  | **自瞄开关** | ON 才允许 PC 自瞄请求（mode=2）开火 |
+ * | `reload_ctrl`   | **退弹** | 拨弹盘反转，不需要摩擦轮到速 |
+ * | `friction_ctrl` | **摩擦轮开关** | 按下沿切换 ON/OFF；ON 后升速到 kFrictionOmega |
+ * | `stop`          | **失能状态位** | 置位 → 整机构失能：零电流 + 清 PID 积分 + 摩擦轮开关复位 |
+ *
+ * 摩擦轮用四态软开关（Idle/Spinup/Ready/Fault）：失能或掉线一律回 Idle，
+ * 恢复后必须重新手动按一次才会转。
  *
  * `stop` 当前取遥控三态开关的停止位（见 IsStop()）；将来协议单独给出 stop 位时只改 IsStop()。
  *
@@ -30,8 +44,10 @@
  * | 数据 | 通道 / 段 | 生产者 | 本线程的角色 |
  * |------|-----------|--------|--------------|
  * | 遥控指令 | zbus `pub_remote_to` | thread/remote | 轮询读（状态通道无订阅者） |
+ * | 自瞄开火 | zbus `pub_pc_to` | thread/pc | 轮询读（mode=2 且链路新鲜 → 开火） |
  * | 电机反馈 | `.can_rx3` 段 | 本线程（总线所有者） | 只注册 CAN_RX_HANDLER |
  * | 控制电流 | k_msgq `user_can3_msgq` | 本线程 | 入队后本线程外发 |
+ * | 弹丸检测 | PA18 上升沿中断 | GPIO ISR（本文件 ShootIrqIsr） | 中断里 `shot_count` +1 |
  *
  * ⚠️ 本线程是 user-can3 总线的所有者：Init 与收帧分发入口都在这里，
  *    其它线程只能注册 CAN_RX_HANDLER，不要再 Can::Init() / SetRxCallback()。
@@ -50,8 +66,8 @@
  *
  *   · `stop` 置位、或遥控掉线（kLinkTimeoutMs 内没有新的遥控帧）：摩擦轮停转、拨弹盘停转，
  *     清 PID 积分并强制零电流；控制帧照发（0 电流），电调不会因为超时进保护；
- *   · 摩擦轮没到速（< kFrictionReadyRatio × 目标）不允许进弹，避免弹速不稳 / 卡弹；
- *   · 摩擦轮没开（shoot_ctrl = Off）同样不允许进弹；
+ *   · 摩擦轮没到速（未进 READY）不允许进弹，避免弹速不稳 / 卡弹；
+ *   · 摩擦轮开关在失能 / 掉线时复位为 OFF，恢复后需重新手动开；
  *   · 拨弹盘堵转（有电流、几乎不转）超过 kJamDetectMs → 反转 kJamReverseMs 退弹后恢复；
  *   · 电流先限幅再换算成电调原始值（越界会整数回绕）。
  *
@@ -72,7 +88,6 @@
  *
  *   · 反馈超时保护：DJI 模块没有反馈时间戳，ESC 掉线时速度环会顶到电流限幅，
  *     等模块补上"反馈新鲜度"后再在此处断流；
- *   · 自瞄火控（autoaim_ctrl）开火源未定：视觉开火还没有数据通道，先与手动开火共用 reload_ctrl；
  *   · 弹速闭环 / 热量限制需要弹速传感器与裁判系统数据，暂未接入。
  *
  * @copyright Copyright (c) 2026
@@ -84,11 +99,13 @@
 #include "Init_entry.hpp"
 #include "trd_booster.hpp"
 #include "remote_to.hpp"
+#include "pc_to.hpp"
 #include "can.hpp"
 
 #include <algorithm>
 #include <math.h>
 #include <string.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -108,6 +125,90 @@ using namespace instance::booster;
 static Thread<2048> thread_ {};
 static Can can3 {};                             // user-can3 总线对象（本线程私有）
 
+// ==================== 弹丸检测（外部中断）====================
+/// 弹丸检测引脚：overlay 里 /zephyr,user 的 booster-shoot-irq-gpios（PA18，上升沿有效）。
+/// 放在 /zephyr,user 是因为只有有 compatible 的节点和 /zephyr,user 才会生成属性宏。
+#define BOOSTER_SHOOT_IRQ_NODE DT_PATH(zephyr_user)
+static const gpio_dt_spec shoot_irq =
+    GPIO_DT_SPEC_GET(BOOSTER_SHOOT_IRQ_NODE, booster_shoot_irq_gpios);
+static gpio_callback shoot_irq_cb {};
+
+/// ============================ 弹丸检测判据 ============================
+/// 判据 = **密簇** + **自适应并窗**，两级：
+///
+///   1) 密簇：相邻沿间隔 ≤ kShootIrqClusterMs 的算一簇，一簇里沿数 ≥ kShootIrqClusterMin
+///      才够格算一发 —— 真事件是一簇密集沿，干扰是零散单根沿；
+///   2) 并窗：够格的簇还要和"上一次计入的那一发"间隔 ≥ 当前并窗，否则并进前一发
+///      —— 一发弹的余振常在 20~50 ms 后再形成第二个密簇，只靠密度会把它算成新的一发。
+///
+/// 并窗是**自适应**的：并窗 = 实测射速间隔 − kShootIrqMergeSlackMs，夹在 [min, max] 内。
+/// 固定并窗的两难是：射速快时窗口必须小于射速间隔（否则吃掉真弹），射速慢时窗口又要足够大
+/// 才能并掉尾簇（实测尾簇最晚能到首发后约 100 ms）—— 所以按实测射速间隔动态取，
+/// 连发时自动收紧、点射/慢速时自动放宽。
+///
+/// 调法：判"发数偏多" → 减小 kShootIrqMergeSlackMs（并窗变大）或提高 kShootIrqMergeMaxMs；
+/// 判"发数偏少" → 先看簇内沿数直方图的 1/2 根两档是不是把真弹丢掉了，再决定是降
+/// kShootIrqClusterMin 还是加大 kShootIrqMergeSlackMs。硬件修好后（单沿干净）设
+/// kShootIrqClusterMin = 1 即可退化成最朴素的"一个沿一发"。
+static constexpr uint32_t kShootIrqClusterMs  = 10;   ///< 相邻沿间隔 ≤ 本值 = 同一簇
+static constexpr uint8_t  kShootIrqClusterMin = 3;    ///< 一簇至少这么多沿才算一发弹（实测 ≈9 根/发）
+
+static constexpr uint32_t kShootIrqMergeMinMs   = 40;   ///< 并窗下限
+static constexpr uint32_t kShootIrqMergeMaxMs   = 120;  ///< 并窗上限（尾簇最长约 100 ms）
+static constexpr uint32_t kShootIrqMergeSlackMs = 15;   ///< 并窗与下一发首簇之间至少留的余量
+static constexpr uint32_t kShootIrqPeriodInitMs = 100;  ///< 冷启动还没学到射速时假设的间隔
+static constexpr uint32_t kShootIrqPeriodMinMs  = 50;   ///< 射速间隔估计的夹紧范围
+static constexpr uint32_t kShootIrqPeriodMaxMs  = 1000;
+static constexpr uint8_t  kShootIrqPeriodShift  = 2;    ///< 射速估计滑动平均权重 1/4（约 4 发跟上）
+
+/// 原始上升沿数（诊断：对比 shot_count 就知道一发被算了几次）
+// static atomic_t g_shoot_irq_edges  = ATOMIC_INIT(0);
+/// 被并窗并掉的密簇个数 —— 同一发的余振簇（实测 11 个/102 发；突然变多说明并窗偏小）
+static atomic_t g_shoot_irq_merged = ATOMIC_INIT(0);
+
+// ---- 下面这几个只有 ISR 读写，不需要原子/加锁 ----
+static uint32_t g_shoot_irq_cluster_ms  = 0;      ///< 本簇第一根沿的时刻
+static uint8_t  g_shoot_irq_cluster_num = 0;      ///< 本簇已收到的沿数
+static bool     g_shoot_irq_counted     = false;  ///< 本簇是否已经计过一发
+static uint32_t g_shoot_irq_last_count_ms = 0;    ///< 上次"计入一发"的时刻（并窗基准）
+static bool     g_shoot_irq_has_count     = false; ///< 是否已经计入过一发（第一次不做并窗）
+
+/// 实测射速间隔（两次"计入"之间的 ms 数，滑动平均；长时间停火后的长间隔不采信）
+static uint32_t g_shoot_irq_period_ms = kShootIrqPeriodInitMs;
+/// 当前并窗（诊断可直接看：连发时会收紧，点射/慢速时会放宽）
+// static uint32_t g_shoot_irq_merge_ms  = kShootIrqPeriodInitMs - kShootIrqMergeSlackMs;
+
+/**
+ * @brief 由实测射速间隔算当前并窗：clamp(间隔 − slack, [min, max])
+ *
+ * 间隔已经被夹在 [kShootIrqPeriodMinMs, kShootIrqPeriodMaxMs]，所以减法不会下溢；
+ * 冷启动时估计值是 kShootIrqPeriodInitMs(100 ms) → 并窗 85 ms
+ * 但仍在"射击间隔 ≥100 ms"的余量内。
+ */
+static uint32_t ShootIrqMergeWindow()
+{
+    uint32_t w = g_shoot_irq_period_ms - kShootIrqMergeSlackMs;
+    if (w < kShootIrqMergeMinMs) {
+        w = kShootIrqMergeMinMs;
+    } else if (w > kShootIrqMergeMaxMs) {
+        w = kShootIrqMergeMaxMs;
+    }
+    return w;
+}
+
+// // ---- 诊断：看信号结构，调判据用 ----
+// /// 原始沿间隔直方图，桶 <1 / 1~5 / 5~20 / 20~50 / 50~100 / ≥100 ms
+// static constexpr uint8_t kEdgeHistBucketNum = 6;
+// static uint16_t g_edge_hist[kEdgeHistBucketNum] {};
+// static uint32_t g_edge_prev_ms = 0;      ///< ISR 独占：上一个原始沿的时刻
+
+// /// 簇内沿数直方图，桶 1 / 2 / 3~5 / 6~9 / ≥10 根（每根沿只属于一簇；正在进行的簇不计）
+// /// 读法：前两档之和 = 被当干扰丢掉的稀疏簇个数；后三档之和 = 计入的发数 + merged。
+// /// 判"发数偏少"时看前两档是不是吃掉了真弹（→ 降 kShootIrqClusterMin）；
+// /// 判"发数偏多"时看后三档是不是远多于真弹造成的余振簇（→ 加大 kShootIrqMergeMs）。
+// static constexpr uint8_t kClusterHistBucketNum = 5;
+// static uint16_t g_cluster_hist[kClusterHistBucketNum] {};
+
 // ==================== 周期 ====================
 static constexpr uint32_t kPeriodMs = 1;
 static constexpr float    kDt      = static_cast<float>(kPeriodMs) / 1000.0f;
@@ -117,7 +218,7 @@ static constexpr float    kDt      = static_cast<float>(kPeriodMs) / 1000.0f;
 static constexpr float kFeederGearRatio = 36.0f;
 /// 摩擦轮（M3508 拆减速箱直驱）：模块给的 ω 就是电机侧 rad/s。
 /// 若轮子仍装在 19.2:1 输出轴上，这里改 3591.f / 187.f，并按输出轴重标 kFrictionOmega
-static constexpr float kFrictionGearRatio = 1.0f;
+static constexpr float kFrictionGearRatio = 3591.0f / 187.0f;
 
 /// M2006 / M3508 转矩常数（模块只用它换算 torque 字段；本线程只用 ω 与 current）
 static constexpr float kFeederTorqueK   = 0.18f;
@@ -126,8 +227,13 @@ static constexpr float kFrictionTorqueK = 0.3f;
 // ==================== 目标量 ====================
 /// 摩擦轮目标角速度（模块单位 rad/s）；弹速 ≈ ω × 轮半径
 static constexpr float kFrictionOmega      = 40.0f;
-/// 到速判定：实测 |ω| ≥ kFrictionReadyRatio × 目标才算"摩擦轮到速"
-static constexpr float kFrictionReadyRatio = 0.8f;
+/// 到速判定（滞环）：进入 READY ≥ kFrictionReadyOn，掉出 READY < kFrictionReadyOff
+static constexpr float kFrictionReadyOn  = 0.85f;
+static constexpr float kFrictionReadyOff = 0.60f;
+/// 升速超时：这么久还没到速判堵转/异常
+static constexpr uint32_t kFrictionSpinupMs = 1500;
+/// 按键去抖：两次翻转间的最小间隔
+static constexpr uint32_t kFrictionKeyGapMs = 50;
 
 /// 拨弹盘目标角速度（输出轴 rad/s）
 static constexpr float kFeederOmega = 5.0f;
@@ -140,15 +246,16 @@ static constexpr uint32_t kFeedPulseMs    = 70;    // 每发拨弹角 ≈ kFeede
 static constexpr float kFrictionCurrentMax = 12.0f;   // A（C620 上限 20 A）
 static constexpr float kFeederCurrentMax   = 6.0f;    // A（C610 上限 10 A）
 
-// ==================== 卡弹自恢复（拨弹盘堵转 → 反转退弹）====================
-static constexpr float    kJamCurrentThresh = 1.5f;   // 堵转判定电流 A
-static constexpr float    kJamOmegaThresh   = 1.0f;   // 堵转判定转速 rad/s
-static constexpr uint32_t kJamDetectMs      = 150;    // 连续堵转这么久判为卡弹
-static constexpr uint32_t kJamReverseMs     = 120;    // 反转退弹时长
+static constexpr float kFrictionOmegaKp = 0.5f;   // 摩擦轮速度环 kp
+static constexpr float kFrictionOmegaKi = 0.2f;   // 摩擦轮速度环 ki
+static constexpr float kFeederOmegaKp   = 0.5f;    // 拨弹盘速度环 kp
+static constexpr float kFeederOmegaKi   = 0.05f;    // 拨弹盘速度环 ki
 
 // ==================== 遥控链路 ====================
 /// 遥控数据新鲜度阈值（与遥控模块自己的 100 ms 超时同量级）
 static constexpr uint32_t kLinkTimeoutMs = 100;
+/// PC 自瞄链路新鲜度阈值（必须与 thread/pc 的 kLinkTimeoutMs 一致）
+static constexpr uint32_t kAimTimeoutMs  = 100;
 
 // ==================== 诊断 ====================
 static constexpr uint8_t  kTxPerTickMax  = 4;         // 每拍最多外发帧数
@@ -160,27 +267,128 @@ static constexpr uint32_t kTuneLogPeriod = 200;       // 整定日志周期（ms
 /// 一拍的控制意图（全部来自遥控，见文件头"控制数据语义"）
 struct Command
 {
-    bool fire     = false;   ///< reload_ctrl：开火
-    bool friction = false;   ///< shoot_ctrl ：开摩擦轮
+    bool fire     = false;   ///< shoot_ctrl：开火
+    bool reload   = false;   ///< reload_ctrl : 退弹
+    bool friction = false;   ///< friction_ctrl ：开摩擦轮
     bool stop     = false;   ///< stop       ：失能状态位
     bool online   = false;   ///< 遥控链路是否有效
 };
 
 static Command g_cmd {};
-static bool    g_disabled_prev = false;   ///< 上一拍是否处于失能态（用于打沿日志）
+static bool    g_disabled_prev   = false;   ///< 上一拍是否处于失能态（用于打沿日志）
+
+/// 摩擦轮软开关状态机
+enum class FrictionState : uint8_t
+{
+    Idle = 0,   ///< 关（目标 0）
+    Spinup,     ///< 升速中
+    Ready,      ///< 已到速，允许进弹
+    Fault,      ///< 升速超时，目标 0，按一下重试
+};
+
+static FrictionState g_friction_state     = FrictionState::Idle;
+static bool          g_friction_key_prev  = false;   ///< 上一拍按键状态（取按下沿）
+static uint32_t      g_friction_key_ms    = 0;       ///< 上次翻转时刻（去抖）
+static uint32_t      g_friction_spinup_ms = 0;       ///< 本轮升速起始时刻（超时判定）
 
 static float g_friction_target = 0.0f;                 ///< 摩擦轮目标 ω rad/s
 static float g_feeder_target   = 0.0f;                 ///< 拨弹盘目标 ω rad/s
 static float g_feeder_current  = 0.0f;                 ///< 拨弹盘速度环输出电流 A（诊断用）
 static float g_friction_current[kFrictionCount] {};    ///< 摩擦轮速度环输出电流 A
 
-static uint32_t g_next_shot_ms   = 0;     ///< 允许启动下一发的时刻（射频限流）
-static uint32_t g_shot_end_ms    = 0;     ///< 本发进弹结束时刻
-static uint32_t g_stall_ms       = 0;     ///< 堵转起始时刻（0 = 未堵转）
-static uint32_t g_reverse_end_ms = 0;     ///< 反转退弹结束时刻
-
 static uint32_t g_drop    = 0;            ///< 队列满丢帧计数
 static uint32_t g_tx_fail = 0;            ///< CAN 发送失败计数
+
+/**
+ * @brief 弹丸检测中断服务：一簇密集的上升沿（≥kShootIrqClusterMin 根）= 一发弹丸通过
+ *
+ * 在 GPIO 中断上下文执行（HPM GPIO 端口 ISR 里调 callback），只做 atomic 操作：
+ * 不加锁、不打印、不做任何可能阻塞的动作。
+ *
+ * 判据（见文件上方 kShootIrq* 常量的说明）：
+ *   · 先分簇（间隔 ≤kShootIrqClusterMs 算一簇），一簇沿数 ≥kShootIrqClusterMin 才够格；
+ *   · 够格的簇再看并窗：距上次计入不足当前并窗（= 实测射速间隔 − 余量，自适应）就并进前一发；
+ *   · 计入的同时更新射速间隔的滑动平均（停火后的长间隔不采信）。
+ * 一簇只判一次（g_shoot_irq_counted），簇内后续沿直接忽略。
+ */
+static void ShootIrqIsr(const device *, gpio_callback *, uint32_t pins)
+{
+    if ((pins & BIT(shoot_irq.pin)) == 0u) {
+        return;
+    }
+
+    const uint32_t now = k_uptime_get_32();
+
+    // ---- 诊断：原始沿间隔直方图（时间差值用无符号减法，回绕也正确）----
+    // const uint32_t delta = now - g_edge_prev_ms;
+    // g_edge_prev_ms = now;
+    // const uint8_t bucket = (delta < 1u)    ? 0
+    //                      : (delta < 5u)    ? 1
+    //                      : (delta < 20u)   ? 2
+    //                      : (delta < 50u)   ? 3
+    //                      : (delta < 100u)  ? 4
+    //                                        : 5;
+    // if (g_edge_hist[bucket] != UINT16_MAX) {
+    //     ++g_edge_hist[bucket];
+    // }
+
+    // atomic_inc(&g_shoot_irq_edges);
+
+    // ---- 分簇：与上一根沿间隔超过 kShootIrqClusterMs 就是新的一簇 ----
+    if ((now - g_shoot_irq_cluster_ms) > kShootIrqClusterMs) {
+        // 上一簇到此结束：记一笔它的沿数（诊断），然后重开一簇
+        // const uint8_t n  = g_shoot_irq_cluster_num;
+        // const uint8_t cb = (n <= 1u) ? 0 : (n == 2u) ? 1 : (n <= 5u) ? 2 : (n <= 9u) ? 3 : 4;
+        // if (g_cluster_hist[cb] != UINT16_MAX) {
+        //     ++g_cluster_hist[cb];
+        // }
+
+        g_shoot_irq_cluster_ms  = now;
+        g_shoot_irq_cluster_num = 1;
+        g_shoot_irq_counted     = false;
+    } else {
+        ++g_shoot_irq_cluster_num;
+    }
+
+    // ---- 一簇只判一次，且要等本簇沿数够格才判（够格前进来的沿不算数）----
+    if (g_shoot_irq_cluster_num < kShootIrqClusterMin) {
+        return;                                              // 本簇还没证明自己是真事件
+    }
+    if (g_shoot_irq_counted) {
+        return;                                              // 本簇已经判过，簇内后续沿忽略
+    }
+    g_shoot_irq_counted = true;
+
+    // 并窗基准是"上一次计入"，不是"上一根沿"：余振不会把基准往前推，下一发的首簇永远进得来。
+    // 窗口用算出来的当前值（先算窗口再判决，判决之后才更新射速估计）。
+    const uint32_t win = ShootIrqMergeWindow();
+    if (g_shoot_irq_has_count && ((now - g_shoot_irq_last_count_ms) < win)) {
+        atomic_inc(&g_shoot_irq_merged);                     // 同一发的余振密簇：并掉
+        return;
+    }
+
+    // ---- 计入一发，顺便用这次间隔更新射速估计（供下一拍算并窗）----
+    if (g_shoot_irq_has_count) {
+        const uint32_t interval = now - g_shoot_irq_last_count_ms;
+        // 停火 / 换弹后的长间隔不是射速；采信了会把并窗撑大，进而吃掉后面的真弹
+        if (interval <= (g_shoot_irq_period_ms * 4u)) {
+            const int32_t step = ((int32_t)interval - (int32_t)g_shoot_irq_period_ms) /
+                                 (1 << kShootIrqPeriodShift);
+            int32_t est = (int32_t)g_shoot_irq_period_ms + step;
+            if (est < (int32_t)kShootIrqPeriodMinMs) {
+                est = (int32_t)kShootIrqPeriodMinMs;
+            } else if (est > (int32_t)kShootIrqPeriodMaxMs) {
+                est = (int32_t)kShootIrqPeriodMaxMs;
+            }
+            g_shoot_irq_period_ms = (uint32_t)est;
+        }
+    }
+
+    g_shoot_irq_has_count     = true;
+    g_shoot_irq_last_count_ms = now;
+    // g_shoot_irq_merge_ms      = ShootIrqMergeWindow();       // 诊断：当前生效的并窗
+    atomic_inc(&shot_count);
+}
 
 /**
  * @brief 失能状态位（stop）
@@ -192,6 +400,23 @@ static uint32_t g_tx_fail = 0;            ///< CAN 发送失败计数
 static bool IsStop(const topic::remote_to::Message &msg)
 {
     return msg.chassis_mode == topic::remote_to::ChassisMode::Stop;
+}
+
+/**
+ * @brief PC 自瞄开火请求：pub_pc_to 在 kAimTimeoutMs 内更新过，且 mode = 2（自瞄开火）
+ */
+static bool AimFireRequested(uint32_t now)
+{
+    static topic::pc_to::Message msg {};
+    static uint32_t last_ver = 0;
+    static uint32_t last_ms  = 0;
+
+    if (zbus_chan_read(&pub_pc_to, &msg, K_NO_WAIT) == 0 && msg.version != last_ver) {
+        last_ver = msg.version;
+        last_ms  = now;
+    }
+    return (last_ms != 0u) && ((now - last_ms) <= kAimTimeoutMs) &&
+           (msg.mode == topic::pc_to::kModeAimFire);
 }
 
 /**
@@ -218,8 +443,13 @@ static void ReadCommand()
     Command cmd {};
     cmd.online   = (last_ms != 0u) && ((now - last_ms) <= kLinkTimeoutMs);
     cmd.stop     = IsStop(msg);
-    cmd.fire     = cmd.online && (msg.reload_ctrl == topic::remote_to::StartMode::On);
-    cmd.friction = cmd.online && (msg.shoot_ctrl  == topic::remote_to::StartMode::On);
+    // 开火：手动 shoot_ctrl，或自瞄开火（autoaim_ctrl ON + PC mode=2 且链路新鲜）
+    const bool aim_fire = (msg.autoaim_ctrl == topic::remote_to::StartMode::On) &&
+                          AimFireRequested(now);
+    cmd.fire     = cmd.online && ((msg.shoot_ctrl == topic::remote_to::StartMode::On) ||
+                                  aim_fire);
+    cmd.reload   = cmd.online && (msg.reload_ctrl == topic::remote_to::StartMode::On);
+    cmd.friction = cmd.online && (msg.friction_ctrl  == topic::remote_to::StartMode::On);
 
     // 失能 / 恢复的沿只打一条日志（1ms 周期里不能刷屏）
     const bool disabled = cmd.stop || !cmd.online;
@@ -240,7 +470,8 @@ static void ReadCommand()
 /**
  * @brief 目标量生成：摩擦轮升速 + 拨弹盘进弹节拍（含卡弹反转）
  *
- * 摩擦轮：开 → kFrictionOmega；其余（未开 / 失能 / 掉线）→ 0（速度环主动刹停）
+ * 摩擦轮：friction_ctrl 按下沿切换软开关，状态机 Idle/Spinup/Ready/Fault；
+ *         失能 / 掉线一律回 Idle（恢复需重新手动开），非激活态目标 0（速度环主动刹停）
  * 拨弹盘：只有 开火 && 未失能 && 链路有效 && 摩擦轮到速 且 距上一发 ≥ kShotIntervalMs
  *         才启动一发，单发持续 kFeedPulseMs；禁止进弹时目标立即归零。
  *
@@ -252,65 +483,89 @@ static void UpdateTarget(const motor::dji::DjiC610::Snapshot &feeder_snap,
 {
     const uint32_t now = k_uptime_get_32();
 
-    // ---- 摩擦轮 ----
-    const bool friction_on = g_cmd.online && g_cmd.friction && !g_cmd.stop;
-    g_friction_target = friction_on ? kFrictionOmega : 0.0f;
+    // ---- 摩擦轮：按下沿切换的软开关 + 升速状态机 ----
+    const bool disabled   = !g_cmd.online || g_cmd.stop;
+    const bool pressed    = g_cmd.friction;
+    const bool press_edge = pressed && !g_friction_key_prev;
 
-    // ---- 到速门控：两轮都到速才允许进弹，否则弹速不稳且容易卡弹 ----
-    bool ready = friction_on;
+    if (disabled) {
+        if (g_friction_state != FrictionState::Idle) {
+            g_friction_state = FrictionState::Idle;
+            LOG_INF("friction OFF (disabled)");
+        }
+    } else if (press_edge && (now - g_friction_key_ms) >= kFrictionKeyGapMs) {
+        g_friction_key_ms = now;                   // 去抖：两次翻转至少间隔 kFrictionKeyGapMs
+        switch (g_friction_state) {
+        case FrictionState::Fault:                  // 故障后按一下重试
+            g_friction_state     = FrictionState::Spinup;
+            g_friction_spinup_ms = now;
+            LOG_INF("friction RETRY");
+            break;
+        case FrictionState::Idle:
+            g_friction_state     = FrictionState::Spinup;
+            g_friction_spinup_ms = now;
+            LOG_INF("friction SPINUP");
+            break;
+        default:                                    // Spinup / Ready → 关
+            g_friction_state = FrictionState::Idle;
+            LOG_INF("friction OFF");
+            break;
+        }
+    }
+    g_friction_key_prev = pressed;
+
+    // 到速判定：两个轮都要满足；READY 时用低阈值，形成滞环防抖
+    bool speed_ok = true;
+    const float speed_thr = (g_friction_state == FrictionState::Ready)
+                                ? kFrictionReadyOff * kFrictionOmega
+                                : kFrictionReadyOn * kFrictionOmega;
     for (uint8_t i = 0; i < kFrictionCount; ++i) {
-        if (fabsf(friction_snap[i].omega) < kFrictionReadyRatio * kFrictionOmega) {
-            ready = false;
+        if (fabsf(friction_snap[i].omega) < speed_thr) {
+            speed_ok = false;
         }
     }
 
-    // ---- 卡弹自恢复：进弹模式下有电流却转不动 → 攒够 kJamDetectMs 就反转退弹 ----
-    // 堵转计时跨过单发之间的空档（空档里电流会掉下去，但不代表机构通了），
-    // 只要中途转起来过就清零；一停止进弹（松开 / 失能 / 退弹中）也清零。
-    const bool firing_mode = g_cmd.fire && ready && (now >= g_reverse_end_ms);
-
-    if (!firing_mode) {
-        g_stall_ms = 0u;
-    } else if (fabsf(feeder_snap.omega) >= kJamOmegaThresh) {
-        g_stall_ms = 0u;                                 // 转起来了：没卡
-    } else if (fabsf(feeder_snap.current) > kJamCurrentThresh) {
-        if (g_stall_ms == 0u) {
-            g_stall_ms = now;
-        } else if ((now - g_stall_ms) >= kJamDetectMs) {
-            g_reverse_end_ms = now + kJamReverseMs;      // 反转退弹
-            g_shot_end_ms    = now;                      // 打断本发，交给反转
-            g_stall_ms       = 0u;
-            LOG_WRN("feeder jam -> reverse %u ms", static_cast<unsigned>(kJamReverseMs));
+    switch (g_friction_state) {
+    case FrictionState::Spinup:
+        if (speed_ok) {
+            g_friction_state = FrictionState::Ready;
+            LOG_INF("friction READY");
+        } else if ((now - g_friction_spinup_ms) > kFrictionSpinupMs) {
+            g_friction_state = FrictionState::Fault;
+            LOG_WRN("friction FAULT (spinup timeout)");
         }
+        break;
+    case FrictionState::Ready:
+        if (!speed_ok) {                            // 掉速 → 回升速重判
+            g_friction_state     = FrictionState::Spinup;
+            g_friction_spinup_ms = now;
+            LOG_WRN("friction speed drop -> respin");
+        }
+        break;
+    default:                                        // Idle / Fault 不闭环
+        break;
     }
 
+    const bool friction_enable = (g_friction_state == FrictionState::Spinup) ||
+                                 (g_friction_state == FrictionState::Ready);
+    g_friction_target = friction_enable ? kFrictionOmega : 0.0f;
+
+    // ---- 进弹门控：只有 READY 才允许进弹，否则弹速不稳且容易卡弹 ----
+    const bool firing_mode = g_cmd.fire && (g_friction_state == FrictionState::Ready);
+
+    const bool reload_mode = g_cmd.reload && (g_friction_state == FrictionState::Ready);
     // ---- 拨弹盘 ----
     g_feeder_target = 0.0f;
 
-    // 1) 反转退弹优先级最高（此时不给进弹）
-    if (now < g_reverse_end_ms) {
+    if(firing_mode && g_cmd.online && !g_cmd.stop)
+    {
         g_feeder_target = -kFeederOmega;
-        return;
     }
 
-    // 2) 禁止进弹（松开 / 失能 / 掉线 / 摩擦轮没到速）：清节拍，下次按下立即响应
-    if (!firing_mode) {
-        g_shot_end_ms  = now;
-        g_next_shot_ms = now;
-        return;
-    }
-
-    // 3) 射频限流后启动一发
-    if (now >= g_next_shot_ms) {
-        g_shot_end_ms  = now + kFeedPulseMs;
-        g_next_shot_ms = now + kShotIntervalMs;
-        atomic_inc(&shot_count);                     // 累计进弹次数（PC 链路读它填 bullet_count）
-    }
-
-    // 4) 只在进弹脉冲内给转速
-    if (now < g_shot_end_ms) {
+    if (reload_mode && g_cmd.online && !g_cmd.stop) {
         g_feeder_target = kFeederOmega;
     }
+
 }
 
 /**
@@ -338,7 +593,7 @@ static void ControlCalculate(const motor::dji::DjiC610::Snapshot &feeder_snap,
             g_friction_current[i] = 0.0f;
         } else {
             g_friction_current[i] =
-                friction_omega_pid[i].Calc(g_friction_target, friction_snap[i].omega);
+                friction_omega_pid[i].Calc(i ? -g_friction_target : g_friction_target, friction_snap[i].omega);
         }
     }
 }
@@ -426,17 +681,38 @@ static void LogTuning(const motor::dji::DjiC610::Snapshot &feeder_snap,
     }
     last_ms = now;
 
-    LOG_DBG("feeder w_ref=%d w=%d i=%d | fri w_ref=%d w=%d/%d i=%d/%d | stop=%d link=%d",
-            static_cast<int>(g_feeder_target * 100.0f),
-            static_cast<int>(feeder_snap.omega * 100.0f),
-            static_cast<int>(g_feeder_current * 100.0f),
-            static_cast<int>(g_friction_target * 100.0f),
-            static_cast<int>(friction_snap[0].omega * 100.0f),
-            static_cast<int>(friction_snap[1].omega * 100.0f),
-            static_cast<int>(g_friction_current[0] * 100.0f),
-            static_cast<int>(g_friction_current[1] * 100.0f),
-            g_cmd.stop ? 1 : 0,
-            g_cmd.online ? 1 : 0);
+    // LOG_DBG("feeder w_ref=%d w=%d i=%d | fri w_ref=%d w=%d/%d i=%d/%d | stop=%d link=%d",
+    //         static_cast<int>(g_feeder_target * 100.0f),
+    //         static_cast<int>(feeder_snap.omega * 100.0f),
+    //         static_cast<int>(g_feeder_current * 100.0f),
+    //         static_cast<int>(g_friction_target * 100.0f),
+    //         static_cast<int>(friction_snap[0].omega * 100.0f),
+    //         static_cast<int>(friction_snap[1].omega * 100.0f),
+    //         static_cast<int>(g_friction_current[0] * 100.0f),
+    //         static_cast<int>(g_friction_current[1] * 100.0f),
+    //         g_cmd.stop ? 1 : 0,
+    //         g_cmd.online ? 1 : 0);
+
+    // 弹丸检测诊断：
+    //   shots  = 计入的发数
+    //   edges  = 原始上升沿数
+    //   merged = 被并窗并掉的密簇个数（同一发的余振簇）
+    //   period = 实测射速间隔（滑动平均）；merge = 当前生效的并窗
+    //   edge   = 原始沿间隔直方图（<1 / 1~5 / 5~20 / 20~50 / 50~100 / ≥100 ms）
+    //   cluster= 簇内沿数直方图（1 / 2 / 3~5 / 6~9 / ≥10 根）：
+    //            后三档之和 ≈ 发数 + merged，前两档之和 ≈ 被丢掉的干扰簇数
+    // LOG_DBG("shots=%d edges=%d merged=%d | period=%d ms merge=%d ms",
+    //         static_cast<int>(atomic_get(&shot_count)),
+    //         static_cast<int>(atomic_get(&g_shoot_irq_edges)),
+    //         static_cast<int>(atomic_get(&g_shoot_irq_merged)),
+    //         static_cast<int>(g_shoot_irq_period_ms),
+    //         static_cast<int>(g_shoot_irq_merge_ms));
+    // LOG_DBG("edge    %u %u %u %u %u %u",
+    //         g_edge_hist[0], g_edge_hist[1], g_edge_hist[2],
+    //         g_edge_hist[3], g_edge_hist[4], g_edge_hist[5]);
+    // LOG_DBG("cluster %u %u %u %u %u",
+    //         g_cluster_hist[0], g_cluster_hist[1], g_cluster_hist[2],
+    //         g_cluster_hist[3], g_cluster_hist[4]);
 }
 
 static void Task(void*, void*, void*)
@@ -471,19 +747,42 @@ static void Task(void*, void*, void*)
 bool thread_init()
 {
     // ---- user-can3：本线程是总线所有者（Init + 收帧分发入口）----
-    const device *dev = DEVICE_DT_GET(DT_ALIAS(user_can3));
+    const device *dev = DEVICE_DT_GET(DT_ALIAS(booster_can));
     if (!device_is_ready(dev)) {
-        LOG_ERR("user_can3 not ready");
+        LOG_ERR("booster_can not ready");
         return false;
     }
 
     // DJI 电调是经典 CAN（非 FD）：用默认的 CAN_MODE_NORMAL
     const can_filter filter { .id = 0, .mask = 0, .flags = 0 };   // 全收，按 ID 分发
     if (!can3.Init(dev, filter)) {
-        LOG_ERR("user_can3 init fail");
+        LOG_ERR("booster_can init fail");
         return false;
     }
     can3.SetRxCallback(user_can3_rx_callback);
+
+    // ---- 弹丸检测：PA18 上升沿中断 → shot_count +1（与 CAN 收发无耦合）----
+    if (!device_is_ready(shoot_irq.port)) {
+        LOG_ERR("shoot irq gpio not ready");
+        return false;
+    }
+    gpio_init_callback(&shoot_irq_cb, ShootIrqIsr, BIT(shoot_irq.pin));
+    if (gpio_add_callback(shoot_irq.port, &shoot_irq_cb) < 0) {
+        LOG_ERR("shoot irq callback add fail");
+        return false;
+    }
+    if ((gpio_pin_configure_dt(&shoot_irq, GPIO_INPUT) < 0) ||
+        (gpio_pin_interrupt_configure_dt(&shoot_irq, GPIO_INT_EDGE_TO_ACTIVE) < 0)) {
+        LOG_ERR("shoot irq config fail (pin %u)", static_cast<unsigned>(shoot_irq.pin));
+        return false;
+    }
+    LOG_INF("shoot irq ready: %s pin %u edge->active, cluster %u ms / min %u edges, "
+            "merge %u~%u ms adaptive",
+            shoot_irq.port->name, static_cast<unsigned>(shoot_irq.pin),
+            static_cast<unsigned>(kShootIrqClusterMs),
+            static_cast<unsigned>(kShootIrqClusterMin),
+            static_cast<unsigned>(kShootIrqMergeMinMs),
+            static_cast<unsigned>(kShootIrqMergeMaxMs));
 
     // ---- 电机：拨弹盘（M2006 + C610）+ 摩擦轮 ×2（M3508 + C620）----
     motor::dji::DjiC610::Config feeder_cfg {};
@@ -497,7 +796,7 @@ bool thread_init()
     {
         motor::dji::DjiC620::Config cfg {};
         cfg.rx_id         = kFrictionRxId[i];
-        cfg.gearbox_ratio = kFrictionGearRatio;    // 1.0 → 模块给的 ω 是电机侧角速度
+        cfg.gearbox_ratio = kFrictionGearRatio; 
         cfg.torque_k      = kFrictionTorqueK;
         cfg.wheel_r       = 0.0f;                  // 摩擦轮不做线速度换算
         friction_motor[i].Init(cfg);
@@ -505,8 +804,8 @@ bool thread_init()
 
     // ---- 速度环（输出 = 电流 A，占位增益，上车前按实车整定）----
     alg::pid::Pid::Config feeder_pid {};
-    feeder_pid.kp      = 0.5f;                  // A per rad/s
-    feeder_pid.ki      = 0.1f;
+    feeder_pid.kp      = kFeederOmegaKp;                  // A per rad/s
+    feeder_pid.ki      = kFeederOmegaKi;
     feeder_pid.kd      = 0.0f;
     feeder_pid.iOutMax = kFeederCurrentMax;     // 积分限幅与输出限幅一致，防饱和蓄积分
     feeder_pid.outMax  = kFeederCurrentMax;     // 输出即电流，限幅保护机构
@@ -515,8 +814,8 @@ bool thread_init()
     feeder_omega_pid.Init(feeder_pid);
 
     alg::pid::Pid::Config friction_pid {};
-    friction_pid.kp      = 0.05f;               // A per rad/s
-    friction_pid.ki      = 0.02f;
+    friction_pid.kp      = kFrictionOmegaKp;               // A per rad/s
+    friction_pid.ki      = kFrictionOmegaKi;
     friction_pid.kd      = 0.0f;
     friction_pid.iOutMax = kFrictionCurrentMax;
     friction_pid.outMax  = kFrictionCurrentMax;

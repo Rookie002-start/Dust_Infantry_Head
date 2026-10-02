@@ -1,21 +1,16 @@
 /**
  * @file trd_mcu_inter.cpp
  * @author qingyu
- * @brief 上板 → 下板发送线程（经典 CAN 拆帧）
- *        - 状态分片有两个来源：
- *          ① 拉取（pull）：本板已有消费者、只发一次通道的量 → RefreshFromChannels()
- *             · ImuState  ← pub_imu_to（框架 IMU 模块）
- *             · CommState ← pub_remote_to（遥控，归一化 → 指令）
- *          ② 入队（push）：只给对端用、本地没人消费的量 → PostFrame 走 k_msgq（如 AutoAimState）
- *        - 两个来源都写进同一份【本线程私有】分片缓存，按 Dir::Up 布局聚合成 63B 聚合帧
- *        - 整帧一次发出（CAN FD，FDF + BRS），周期发出
+ * @brief 上板 → 下板发送线程（CAN FD 整帧）
+ *        - 三个分片全部从 zbus 通道拉取最新值 → RefreshFromChannels()
+ *            · ImuState     ← pub_imu_to（框架 IMU 模块）
+ *            · CommState    ← pub_remote_to（遥控，归一化 → 指令）
+ *            · AutoAimState ← pub_pc_to（PC 自瞄，取 yaw/pitch 角度）
+ *        - 分片写进同一份【本线程私有】缓存，按 Dir::Up 布局聚合成 63B 聚合帧，周期整帧发出
  *
- * ⚠️ 自瞄分片（AutoAimState）来自**上板 PC 链路线程**（thread/pc）：PC 掉线后没有
- *    人会再刷新它，所以这里按"分片年龄"判活（kVisionTimeoutMs）——超时就把
- *    CommState.flags 的 VisionOk/VisionFire 清零（帧里保留最后的角度，下板按位忽略），
- *    下板据此回手动瞄准；恢复时自动重新置位，不需要握手。
- *    kVisionTimeoutMs 必须与 thread/pc 的 kLinkTimeoutMs 一致，否则会出现
- *    "上游还在发、下游已经判失效"或反过来的错配。
+ * ⚠️ 自瞄分片来自 thread/pc 的 pub_pc_to：按 version 年龄判活（kVisionTimeoutMs），
+ *    超时即清 VisionOk/VisionFire 并把角度清零 → 下板回手动瞄准；恢复自动置位，无需握手。
+ *    kVisionTimeoutMs 必须与 thread/pc 的 kLinkTimeoutMs 一致。
  *
  * ⚠️ 本线程是 user-can2 总线的所有者：初始化与收帧分发入口都在这里。
  *    接收侧（thread/inter_rx）只注册 CAN_RX_HANDLER，**不要**再次 Can::Init() /
@@ -35,11 +30,11 @@
 
 #include "thread.hpp"
 #include "Init_entry.hpp"
-#include "to_mcu_tx.hpp"
 #include "inter_cmd.hpp"
 #include "trd_inter_bus.hpp"  // 总线所有者（Init 在里面，本线程只当使用者）
 #include "imu_to.hpp"         // pull 来源：IMU 通道
 #include "remote_to.hpp"      // pull 来源：遥控通道
+#include "pc_to.hpp"          // pull 来源：PC 自瞄通道
 #include "can.hpp"
 #include "Irq_handlers.h"
 #include <string.h>
@@ -56,19 +51,6 @@ namespace thread::mcu_inter
     static constexpr uint8_t        kStateLen  = inter_cmd::FrameLen(kDir);    // 63
     static constexpr uint32_t       kPeriodMs  = 1;                      // FD 整帧，见文件头带宽说明
 
-    /// 自瞄分片在本方向契约表里的下标（-1 = 本方向没有该分片）
-    constexpr int AutoAimSlotIndex()
-    {
-        for (uint8_t i = 0; i < inter_cmd::kStateFragCount; ++i) {
-            if (inter_cmd::kStateFrags[i].dir == kDir &&
-                inter_cmd::kStateFrags[i].type == inter_cmd::FrameType::StateAutoAim) {
-                return static_cast<int>(i);
-            }
-        }
-        return -1;
-    }
-    static constexpr int kAutoAimSlot = AutoAimSlotIndex();
-
     // ---- 发送等待时间 ----
     // 等空 TX 缓冲区再发，避免总线被占满时直接丢帧（一条 63B FD 帧 ≈ 0.35ms）
     static constexpr uint32_t kTxTimeoutMs = 2;
@@ -79,14 +61,11 @@ namespace thread::mcu_inter
         uint8_t data[kFrameSize];
         uint8_t len;
         bool    valid;
-        uint32_t stamp_ms;      // 本分片最后一次更新的时刻（判"分片年龄"用）
-        uint8_t flags;          // 生产者随分片带来的标志位（= CommState.flags 位定义）
     };
     static Slot slots[inter_cmd::kStateFragCount] {};
 
     /// 更新本方向的分片缓存
-    static void UpdateSlot(inter_cmd::FrameType type, const uint8_t *data, uint8_t len,
-                           uint8_t flags = 0)
+    static void UpdateSlot(inter_cmd::FrameType type, const uint8_t *data, uint8_t len)
     {
         for (uint8_t i = 0; i < inter_cmd::kStateFragCount; ++i)
         {
@@ -100,8 +79,6 @@ namespace thread::mcu_inter
             memcpy(slots[i].data, data, len);
             slots[i].len   = len;
             slots[i].valid = true;
-            slots[i].flags = flags;
-            slots[i].stamp_ms = k_uptime_get_32();
             return;
         }
         LOG_WRN("not my direction/type: 0x%02x", static_cast<uint8_t>(type));
@@ -162,11 +139,6 @@ namespace thread::mcu_inter
     {
         memcpy(dst, &v, sizeof(v));
     }
-
-    // TODO(量程待定)：归一化遥控 → 目标角。下板云台会把 pitch 钳到 [kPitchMin,kPitchMax]，
-    //  但 yaw_angle 是"绝对目标角"，量程不对会明显跑偏 —— 实机前必须标定这两个常数。
-    static constexpr float kGimbalYawRange   = 3.1415926f;   // ±180°
-    static constexpr float kGimbalPitchRange = 0.5236f;      // ±30°
 
     /// 数据源新鲜度阈值：超过这么久没有新样本就认为该源掉了
     /// （遥控模块自己的超时是 100ms，取同一个量级）
@@ -229,8 +201,8 @@ namespace thread::mcu_inter
             link_ok = (r.version != 0u) &&
                       ((now - remote_ver_ms) <= static_cast<int64_t>(kSourceTimeoutMs));
 
-            comm_state.yaw_angle    = r.yaw   * kGimbalYawRange;     // 归一化 → 绝对目标角 (rad)
-            comm_state.pitch_angle  = r.pitch * kGimbalPitchRange;   // 归一化 → 绝对目标角 (rad)
+            comm_state.yaw_angle    = r.yaw ; 
+            comm_state.pitch_angle  = r.pitch;
             comm_state.chassis_vx   = r.chassisx;                    // 下板按 [-1,1] 归一化处理
             comm_state.chassis_vy   = r.chassisy;
             comm_state.chassis_rot  = 0.0f;                          // TODO: remote_to 无自转量，来源待定
@@ -249,31 +221,51 @@ namespace thread::mcu_inter
             comm_state.Switch.Refresh_UI     = 0;
         }
 
-        // 每周期都刷新标志位并写分片：遥控没连上时 CommState 就是"全 0 + 无 LinkOk"的失效指令
-        // （下板据此停车），IMU 位则如实反映 IMU 新鲜度，不受遥控在不在线影响。
-        // 自瞄位来自 PC 链路（push 分片）：按分片年龄判活，PC 掉线后自动清零 → 下板回手动。
+        // ---- AutoAimState ← pub_pc_to（PC 自瞄解算：取 yaw/pitch 角度，mode 决定标志位）----
+        static topic::pc_to::Message pc {};
+        static uint32_t pc_ver    = 0;
+        static int64_t  pc_ver_ms = 0;
         uint8_t vision_bits = 0;
-        if (kAutoAimSlot >= 0)
-        {
-            const Slot &s = slots[kAutoAimSlot];
-            const bool fresh = s.valid &&
-                ((now - s.stamp_ms) <= static_cast<int64_t>(kVisionTimeoutMs));
-            if (fresh) {
-                vision_bits = static_cast<uint8_t>(s.flags &
-                                                   (inter_cmd::kCommFlagVisionOk |
-                                                    inter_cmd::kCommFlagVisionFire));
+
+        if (zbus_chan_read(&pub_pc_to, &pc, K_NO_WAIT) == 0 && pc.version != 0u) {
+            if (pc.version != pc_ver) {
+                pc_ver    = pc.version;
+                pc_ver_ms = now;
+            }
+            const bool fresh  = (now - pc_ver_ms) <= static_cast<int64_t>(kVisionTimeoutMs);
+            const bool aim_ok = fresh && (pc.mode >= topic::pc_to::kModeAim);
+
+            vision_bits = static_cast<uint8_t>(aim_ok ? inter_cmd::kCommFlagVisionOk : 0u);
+            if (aim_ok && pc.mode == topic::pc_to::kModeAimFire) {
+                vision_bits = static_cast<uint8_t>(vision_bits | inter_cmd::kCommFlagVisionFire);
             }
 
-            // 只在"自瞄数据可用 ↔ 失效/无开火"的沿上打日志（1ms 周期不能刷屏）
-            static bool vision_logged_ok = false;
-            const bool vision_ok = (vision_bits & inter_cmd::kCommFlagVisionOk) != 0u;
-            if (vision_ok != vision_logged_ok) {
-                vision_logged_ok = vision_ok;
-                LOG_INF("PC auto-aim %s (fire=%u)",
-                        vision_ok ? "online" : "stale/idle",
-                        (vision_bits & inter_cmd::kCommFlagVisionFire) ? 1u : 0u);
+            // 失效 / 空闲 → 角度全 0（下板按 flags 忽略，不留上一帧的自瞄量）
+            inter_cmd::AutoAimState st {};
+            if (aim_ok) {
+                PutFloat(st.yaw_angle,   pc.yaw_ang);
+                PutFloat(st.yaw_omega,   pc.yaw_vel);
+                PutFloat(st.yaw_accl,    pc.yaw_acc);
+                PutFloat(st.pitch_angle, pc.pitch_ang);
+                PutFloat(st.pitch_omega, pc.pitch_vel);
+                PutFloat(st.pitch_accl,  pc.pitch_acc);
             }
+            UpdateSlot(inter_cmd::FrameType::StateAutoAim,
+                       reinterpret_cast<const uint8_t *>(&st), sizeof(st));
         }
+
+        // 只在"自瞄数据可用 ↔ 失效/空闲"的沿上打日志（1ms 周期不能刷屏）
+        static bool vision_logged_ok = false;
+        const bool vision_ok = (vision_bits & inter_cmd::kCommFlagVisionOk) != 0u;
+        if (vision_ok != vision_logged_ok) {
+            vision_logged_ok = vision_ok;
+            LOG_INF("PC auto-aim %s (fire=%u)",
+                    vision_ok ? "online" : "stale/idle",
+                    (vision_bits & inter_cmd::kCommFlagVisionFire) ? 1u : 0u);
+        }
+
+        // 每周期都刷新标志位并写分片：遥控没连上时 CommState 就是"全 0 + 无 LinkOk"的失效指令
+        // （下板据此停车），IMU 位则如实反映 IMU 新鲜度，不受遥控在不在线影响。
 
         comm_state.flags = static_cast<uint8_t>((link_ok ? inter_cmd::kCommFlagLinkOk : 0u) |
                                                 (imu_ok  ? inter_cmd::kCommFlagImuOk  : 0u) |
@@ -291,14 +283,7 @@ namespace thread::mcu_inter
             // 1) 拉取通道来源的分片
             RefreshFromChannels();
 
-            // 2) 清空队列：只给对端用的分片（push 路径）
-            topic::to_mcu_tx::Message ev{};
-            while (k_msgq_get(&user_can2_msgq, &ev, K_NO_WAIT) == 0)
-            {
-                UpdateSlot(static_cast<inter_cmd::FrameType>(ev.tag), ev.data, ev.len, ev.flags);
-            }
-
-            // 3) 聚合本方向状态帧 → 拆帧发出
+            // 2) 聚合本方向状态帧 → 整帧发出
             uint8_t buf[kFrameSize];
             const uint8_t len = PackState(buf);
             if (len > 0) {

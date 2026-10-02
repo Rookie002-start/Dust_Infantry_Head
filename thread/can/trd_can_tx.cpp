@@ -63,7 +63,7 @@ void my_rxcallback(struct can_frame &frame, void *)
 bool thread_init()
 {
     {
-        const device* dev = DEVICE_DT_GET(DT_ALIAS(user_can1));
+        const device* dev = DEVICE_DT_GET(DT_ALIAS(inter_can));
         if (!device_is_ready(dev)) {
             LOG_ERR("user_can1 not ready");
             return false;

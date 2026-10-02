@@ -2,18 +2,18 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "HPM5361 调试 (J-Link JTAG)",
+            "name": "HPM5361 调试 (DAP JTAG)",
             "type": "cppdbg",
             "request": "launch",
             "cwd": "${workspaceFolder}",
             "program": "${workspaceFolder}/build/zephyr/zephyr.elf",
             "MIMode": "gdb",
             "miDebuggerPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gdb",
-            "miDebuggerServerAddress": "localhost:3333",
-            "debugServerPath": "/home/rookie/openocd-hpm/bin/openocd",
+            "miDebuggerServerAddress": "127.0.0.1:3333",
+            "debugServerPath": "${workspaceFolder}/boards/hpm/hpm5361icb/openocd-cmsis-dap-wrapper.sh",
             "debugServerArgs": "-s /home/rookie/Zephyr_HPMicro/sdk_env/hpm_sdk/boards/openocd -s /home/rookie/Zephyr_HPMicro/sdk_glue_user/boards/openocd -f ${workspaceFolder}/boards/hpm/hpm5361icb/openocd-debug.cfg",
             "serverStarted": "Listening on port .* for gdb connections",
-            "serverLaunchTimeout": 30000,
+            "serverLaunchTimeout": 60000,
             "filterStderr": true,
             "setupCommands": [
                 {
@@ -31,13 +31,19 @@
             "externalConsole": false
         },
         {
-            "name": "HPM5361 附加 (J-Link JTAG)",
+            "name": "HPM5361 附加 (DAP JTAG)",
             "type": "cppdbg",
-            "request": "attach",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
             "program": "${workspaceFolder}/build/zephyr/zephyr.elf",
             "MIMode": "gdb",
             "miDebuggerPath": "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gdb",
-            "miDebuggerServerAddress": "localhost:3333",
+            "miDebuggerServerAddress": "127.0.0.1:3333",
+            "debugServerPath": "${workspaceFolder}/boards/hpm/hpm5361icb/openocd-cmsis-dap-wrapper.sh",
+            "debugServerArgs": "-s /home/rookie/Zephyr_HPMicro/sdk_env/hpm_sdk/boards/openocd -s /home/rookie/Zephyr_HPMicro/sdk_glue_user/boards/openocd -f ${workspaceFolder}/boards/hpm/hpm5361icb/openocd-debug.cfg",
+            "serverStarted": "Listening on port .* for gdb connections",
+            "serverLaunchTimeout": 60000,
+            "filterStderr": true,
             "setupCommands": [
                 {
                     "description": "开启 gdb pretty printing",
@@ -45,7 +51,8 @@
                     "ignoreFailures": true
                 }
             ],
-            "processId": "1"
+            "launchCompleteCommand": "exec-continue",
+            "externalConsole": false
         },
         {
             "name": "Debug (OpenOCD + CMSIS-DAP)",

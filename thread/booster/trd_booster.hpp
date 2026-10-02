@@ -52,7 +52,9 @@ namespace instance::booster
     inline alg::pid::Pid feeder_omega_pid {};                 ///< 拨弹盘速度环：ω → 电流
     inline alg::pid::Pid friction_omega_pid[kFrictionCount] {};  ///< 摩擦轮速度环：ω → 电流
 
-    /// 累计进弹次数（每启动一发进弹脉冲 +1）：PC 链路拿去填 PCSendAutoAimData.bullet_count。
-    /// 说明：没有弹丸检测时这是"发弹数"的近似值；跨线程只读，用 atomic 保证单调。
+    /// 累计已发射子弹数：弹丸检测引脚（overlay 的 /zephyr,user booster-shoot-irq-gpios，
+    /// 即 PA18）。判据是"一簇密集的上升沿 = 一发"（≥kShootIrqClusterMin 根、间隔
+    /// ≤kShootIrqClusterMs），零散单根沿当干扰丢掉，见 trd_booster.cpp 的 ShootIrqIsr。
+    /// PC 链路线程只读，拿去填 PCSendAutoAimData.bullet_count；用 atomic 保证单调不丢。
     inline atomic_t shot_count = ATOMIC_INIT(0);
 }

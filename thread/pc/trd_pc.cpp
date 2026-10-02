@@ -1,14 +1,15 @@
 /**
  * @file trd_pc.cpp
  * @author qingyu
- * @brief PC（自瞄）链路线程 — USB CDC ACM 单一 owner：收 PC 自瞄数据转下板 + 发 IMU 数据给 PC
+ * @brief PC（自瞄）链路线程 — USB CDC ACM 单一 owner：收 PC 自瞄数据发 zbus + 发 IMU 数据给 PC
  * @version 1.0
  * @date 2026-09-23
  *
  * ## 数据流（两个方向都只在本线程里搬运）
  *
- *     PC ─USB→ 组帧/CRC → inter_cmd::PostFrame(StateAutoAim) ─→ user_can2_msgq
- *              ─→ mcu_inter 聚合(置 VisionOk/VisionFire) ─→ CAN ─→ 下板
+ *     PC ─USB→ 组帧/CRC → zbus pub_pc_to（mode + yaw/pitch）
+ *              ├─ mcu_inter：取 yaw/pitch 组 AutoAimState 下发下板
+ *              └─ booster  ：取 mode 决定自瞄开火（kModeAimFire = 开火）
  *
  *     PC ←USB─ PCSendAutoAimData ← pub_imu_to（框架 IMU 状态通道，轮询取最新值）
  *
@@ -17,18 +18,16 @@
  *   · `usb::Usb::Send()` 非阻塞：未配置/端点在忙直接返回 false，发不出去只丢帧，
  *     不会把"收"卡住；接收完全由 USB 中断 + 环形缓冲驱动，线程只负责搬运；
  *   · USB 的"已配置 / 掉线 / 总线复位"是整条链路共享的状态，收发的判活必须用同一份；
- *   · 数据本身已经解耦：出向是 pull（pub_imu_to），入向是 push（PostFrame 队列）。
+ *   · 数据本身已经解耦：出向是 pull（pub_imu_to），入向是 zbus 发布（pub_pc_to）。
  *     真需要拆线程的条件是"发送变成阻塞式或需要重传窗口"，现在不满足。
  *
  * ## PC 掉线时的行为（本线程 + mcu_inter 两侧配合，阈值都是 100ms）
  *
  *   · 本线程：连续 kLinkTimeoutMs 没有 CRC 通过的帧 → 判链路失效：
- *       ① 不再投递自瞄数据；② 发给 PC 的帧里 mode 回 0（空闲），PC 侧据此知道上板没在用；
+ *       ① 往 pub_pc_to 发一帧 mode=0 的空闲帧；② 发给 PC 的帧里 mode 回 0（空闲）；
  *       ③ 清掉半截帧缓冲，等 PC 重连后重新同步（不需要握手）。
- *   · mcu_inter：按自瞄分片的"年龄"判活，超时就把 CommState.flags 的
- *       VisionOk / VisionFire 清零 → 下板 AutoAimValid/开火请求同时失效 → 回手动瞄准。
- *     这样即使 PC 拔线、PC 程序卡死、或上板本线程没来得及反应，下板也不会拿着陈旧
- *     自瞄角继续打。
+ *   · mcu_inter / booster：按 pub_pc_to 的 version 判活，超时一律不认（下板回手动、
+ *     自瞄停火）。这样即使 PC 拔线、PC 程序卡死，也不会拿着陈旧的自瞄量继续打。
  *   · 恢复：只要有新的 CRC 通过帧就自动恢复（数据自带有效性位），不需要重新握手。
  *
  * ## 待接入（不影响当前功能）
@@ -45,7 +44,7 @@
 #include "thread.hpp"
 #include "Init_entry.hpp"
 #include "pc_protocol.hpp"
-#include "inter_cmd.hpp"
+#include "pc_to.hpp"
 #include "imu_to.hpp"
 #include "usb.hpp"
 
@@ -56,6 +55,7 @@
 #include "trd_booster.hpp"      // bullet_count 来源（累计进弹次数）
 #endif
 
+#include <stddef.h>
 #include <string.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
@@ -88,12 +88,13 @@ static_assert(pc_proto::kRecvFrameLen <= kRxChunk, "recv frame larger than one r
 static uint8_t  g_rx_buf[64] {};
 static uint16_t g_rx_len = 0;
 
-static uint32_t g_rx_frames = 0;        ///< 通过校验并投递出去的自瞄帧
-static uint32_t g_rx_bad    = 0;        ///< CRC/范围检查失败或投递失败的帧
+static uint32_t g_rx_frames = 0;        ///< 通过校验并发布出去的自瞄帧
+static uint32_t g_rx_bad    = 0;        ///< CRC/范围检查失败的帧
 static uint32_t g_tx_fail   = 0;        ///< 发给 PC 的帧被丢弃次数
 static uint32_t g_last_valid_ms = 0;    ///< 最后一次收到有效自瞄帧的时刻
 static uint8_t  g_last_mode = pc_proto::kRecvModeIdle;   ///< 最后一帧有效自瞄数据里的 mode
 static bool     g_link_ok = false;
+static uint32_t g_pub_ver  = 0;         ///< pub_pc_to 的 version 源（每发布 +1）
 
 /// 出向数据源：IMU 快照（pull，无订阅者，version 判新）
 static topic::imu_to::Message g_imu {};
@@ -101,7 +102,30 @@ static uint32_t g_imu_ver      = 0;
 static uint32_t g_last_sent_ver = 0;
 static uint32_t g_last_send_ms  = 0;
 
-// ==================== 接收：组帧 + 校验 + 转下板 ====================
+// ==================== 接收：组帧 + 校验 + 发布 ====================
+
+/// 发布一帧自瞄结果（本线程是 pub_pc_to 的唯一生产者）
+static void PublishAim(const PCRecvAutoAimData &d)
+{
+    topic::pc_to::Message msg {};
+    msg.version   = ++g_pub_ver;
+    msg.mode      = d.mode;
+    msg.yaw_ang   = d.yaw.yaw_ang;
+    msg.yaw_vel   = d.yaw.yaw_vel;
+    msg.yaw_acc   = d.yaw.yaw_acc;
+    msg.pitch_ang = d.pitch.pitch_ang;
+    msg.pitch_vel = d.pitch.pitch_vel;
+    msg.pitch_acc = d.pitch.pitch_acc;
+    (void)zbus_chan_pub(&pub_pc_to, &msg, K_NO_WAIT);
+}
+
+/// 空闲帧：mode=0 + 角度 0（链路失效时发布，消费者立即失效）
+static void PublishIdle()
+{
+    topic::pc_to::Message msg {};
+    msg.version = ++g_pub_ver;
+    (void)zbus_chan_pub(&pub_pc_to, &msg, K_NO_WAIT);
+}
 
 /**
  * @brief 解析一帧 PC 数据（已确认帧头、长度正确）
@@ -114,7 +138,8 @@ static void DecodeRecv(const uint8_t *frame)
     const uint16_t crc_rx =
         static_cast<uint16_t>(frame[pc_proto::kRecvFrameLen - 2]) |
         static_cast<uint16_t>(static_cast<uint16_t>(frame[pc_proto::kRecvFrameLen - 1]) << 8);
-    if (crc_rx != pc_proto::Crc16(frame, pc_proto::kRecvFrameLen - 2)) {
+    if (crc_rx != pc_proto::Crc16(frame,
+                                  static_cast<uint32_t>(offsetof(PCRecvAutoAimData, crc16)))) {
         if ((++g_rx_bad % kDropLogPeriod) == 1u) {
             LOG_WRN("pc frame crc err (total %u)", static_cast<unsigned>(g_rx_bad));
         }
@@ -132,32 +157,9 @@ static void DecodeRecv(const uint8_t *frame)
         return;
     }
 
-    // mode：0 空闲（不下发）/ 1 自瞄不开火 / 2 自瞄开火
-    uint8_t flags = 0;
-    if (d.mode >= pc_proto::kRecvModeAim) {
-        flags = inter_cmd::kCommFlagVisionOk;
-        if (d.mode == pc_proto::kRecvModeAimFire) {
-            flags = static_cast<uint8_t>(flags | inter_cmd::kCommFlagVisionFire);
-        }
-    }
-
-    // 只给下板用：走已预留的 push 通道（端到端队列，唯一消费者是 mcu_inter）
-    inter_cmd::AutoAimState aim {};
-    memcpy(&aim.yaw_angle[0],   &d.yaw.yaw_ang,     sizeof(float));
-    memcpy(&aim.yaw_omega[0],   &d.yaw.yaw_vel,     sizeof(float));
-    memcpy(&aim.yaw_acc[0],     &d.yaw.yaw_acc,     sizeof(float));
-    memcpy(&aim.pitch_angle[0], &d.pitch.pitch_ang, sizeof(float));
-    memcpy(&aim.pitch_omega[0], &d.pitch.pitch_vel, sizeof(float));
-    memcpy(&aim.pitch_acc[0],   &d.pitch.pitch_acc, sizeof(float));
-
-    if (!inter_cmd::PostFrame(inter_cmd::FrameType::StateAutoAim, aim, flags)) {
-        // 发送线程来不及取（正常不会发生，队列深度 16 + 1ms 消费）：丢帧但保留链路判活
-        if ((++g_rx_bad % kDropLogPeriod) == 1u) {
-            LOG_WRN("auto-aim queue full (total %u)", static_cast<unsigned>(g_rx_bad));
-        }
-    } else {
-        ++g_rx_frames;
-    }
+    // mode：0 空闲 / 1 自瞄不开火 / 2 自瞄开火（原样透传，语义由消费者解释）
+    PublishAim(d);
+    ++g_rx_frames;
 
     g_last_valid_ms = k_uptime_get_32();
     g_last_mode     = d.mode;
@@ -212,6 +214,7 @@ static void UpdateLink()
         LOG_INF("PC link online");
     } else {
         LOG_INF("PC link LOST -> auto-aim data stops forwarding (lower board -> manual)");
+        PublishIdle();                              // mode=0：消费者立即失效
     }
 }
 
@@ -266,24 +269,29 @@ static bool SendToPc()
         return false;
     }
 
-    PCSendAutoAimData f {};
+    PCSendAutoAimData PC_Send_Data {};
 
     // 回显上板当前是否在用 PC 的自瞄数据（链路新鲜 + 最近一帧不是"空闲"）
-    f.mode = (g_link_ok && g_last_mode >= pc_proto::kRecvModeAim) ? pc_proto::kSendModeAim
-                                                                 : pc_proto::kSendModeIdle;
+    PC_Send_Data.mode = (g_link_ok && g_last_mode >= pc_proto::kRecvModeAim)
+                            ? pc_proto::kSendModeAim
+                            : pc_proto::kSendModeIdle;
 
     for (uint8_t i = 0; i < 4; ++i) {
-        f.q[i] = g_imu.quaternion[i];
+            PC_Send_Data.q[i] = g_imu.quaternion[i];
     }
-    f.yaw.yaw_ang     = g_imu.yaw_total;     // 累计偏航（可跨圈）：世界系连续角，自瞄解算用
-    f.yaw.yaw_vel     = g_imu.gyro[2];       // z 轴角速度 → 偏航角速度
-    f.pitch.pitch_ang = g_imu.pitch;
-    f.pitch.pitch_vel = g_imu.gyro[1];       // y 轴角速度 → 俯仰角速度
-    f.bullet.bullet_speed = BulletSpeed();
-    f.bullet.bullet_count = BulletCount();
-    f.crc16 = pc_proto::FrameCrc(f);
 
-    if (!usb_.Send(reinterpret_cast<const uint8_t *>(&f), sizeof(f))) {
+    PC_Send_Data.yaw.yaw_ang     = g_imu.yaw_total;   // 累计偏航（可跨圈）：世界系连续角，自瞄解算用
+    PC_Send_Data.yaw.yaw_vel     = g_imu.gyro[2];     // z 轴角速度 → 偏航角速度
+    PC_Send_Data.pitch.pitch_ang = g_imu.pitch;
+    PC_Send_Data.pitch.pitch_vel = g_imu.gyro[1];     // y 轴角速度 → 俯仰角速度
+    PC_Send_Data.bullet.bullet_speed = BulletSpeed();
+    PC_Send_Data.bullet.bullet_count = BulletCount();
+    PC_Send_Data.crc16 = pc_proto::get_crc16_check_sum(
+        reinterpret_cast<uint8_t *>(&PC_Send_Data),
+        static_cast<uint32_t>(offsetof(PCSendAutoAimData, crc16)),
+        0xFFFFU);
+
+    if (!usb_.Send(reinterpret_cast<const uint8_t *>(&PC_Send_Data), sizeof(PC_Send_Data))) {
         if ((++g_tx_fail % kDropLogPeriod) == 1u) {
             LOG_WRN("usb tx drop (not configured / ep busy), total %u",
                     static_cast<unsigned>(g_tx_fail));
@@ -307,7 +315,6 @@ static void Task(void*, void*, void*)
     {
         const int64_t tick_start = k_uptime_ticks();
 
-        // printk("pc communication\r\n");
         // ① 收：USB 中断已把字节压进环形缓冲，这里等通知（超时 = 主循环节拍）
         (void)k_sem_take(&usb_.sem_, K_MSEC(kPeriodMs));
         uint8_t chunk[kRxChunk];

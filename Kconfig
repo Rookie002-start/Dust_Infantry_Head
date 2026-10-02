@@ -54,9 +54,9 @@ config TRD_MCU_INTER
     default n
     select DUST_COM_CAN
     select TRD_INTER_BUS
-    select DUST_TPC_TO_MCU_TX
     select DUST_TPC_IMU_TO
     select DUST_TPC_REMOTE_TO
+    select DUST_TPC_PC_TO
     select INTER_CMD
     help
       上板 → 下板发送线程。总线初始化由 TRD_INTER_BUS 负责（不再绑在发送线程上）。
@@ -104,6 +104,7 @@ config TRD_BOOSTER
     select DUST_MOD_DEV_MOTOR_DJI
     select DUST_MOD_DEV_REMOTE
     select DUST_TPC_TO_CAN_TX
+    select DUST_TPC_PC_TO
     help
       Enable the BOOSTER thread.
       发射机构线程：摩擦轮升速 + 拨弹盘进弹
@@ -114,7 +115,7 @@ config TRD_PC
     default n
     select DUST_COM_USB
     select DUST_TPC_IMU_TO
-    select INTER_CMD
+    select DUST_TPC_PC_TO
     help
       Enable the PC auto-aim link thread（USB CDC ACM）
 

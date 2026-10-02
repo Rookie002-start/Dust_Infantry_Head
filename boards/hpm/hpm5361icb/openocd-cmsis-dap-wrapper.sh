@@ -232,6 +232,18 @@ probe_ready() {
 		grep -q "CMSIS-DAP: Interface ready"
 }
 
+# 通过 openocd 的 TCL 端口发一条命令（默认 6666）。失败就算了，
+# 说明 TCL 没开或 server 已经退出了。
+tcl_cmd() {
+	local port="${HPM_TCL_PORT:-6666}"
+	exec 3<>"/dev/tcp/127.0.0.1/${port}" 2>/dev/null || return 1
+	printf '%s\n' "$1" >&3 2>/dev/null || true
+	sleep 0.3
+	exec 3<&- 2>/dev/null || true
+	exec 3>&- 2>/dev/null || true
+	return 0
+}
+
 # ---- 主流程 -----------------------------------------------------------------
 
 kill_stale_openocd
@@ -261,7 +273,32 @@ if [ "${DO_RESET}" = "1" ]; then
 	fi
 fi
 
-"${REAL_OPENOCD}" "$@"
+# openocd 放后台跑，这样 VS Code 结束调试会话时杀掉本脚本也能做收尾
+# （把 openocd 一起收掉 + 把 cdc_acm 绑回去），否则探针的虚拟串口会一直是解绑状态。
+"${REAL_OPENOCD}" "$@" &
+OCD_PID=$!
+
+on_signal() {
+	# VS Code 直接杀掉 server 进程时走不到 gdb 的 detach，这里补两步：
+	#   1. resume  —— 别把板子留在 halt（控制器固件停在 halt 上很危险）
+	#   2. shutdown —— 让 openocd 自己走正常关闭流程收掉探针
+	#     （直接 kill 有把探针固件留在半截 USB 事务里的风险）
+	tcl_cmd "${HPM_RESUME_CMD:-resume}" >/dev/null 2>&1
+	sleep 0.5
+	tcl_cmd shutdown >/dev/null 2>&1
+	local i
+	for i in $(seq 1 10); do
+		kill -0 "${OCD_PID}" 2>/dev/null || break
+		sleep 0.3
+	done
+	kill "${OCD_PID}" 2>/dev/null
+	wait "${OCD_PID}" 2>/dev/null
+	rebind_cdc_acm >/dev/null 2>&1
+	exit 143
+}
+trap on_signal TERM INT HUP
+
+wait "${OCD_PID}"
 RET=$?
 
 rebind_cdc_acm

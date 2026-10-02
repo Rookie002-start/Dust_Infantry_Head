@@ -9,11 +9,8 @@
  *   整帧一次发完，接收端无需拼包；一帧内所有分片来自同一拍，天然一致。
  *   要求两端都是 FDCAN 板（STM32F4 的 bxCAN 不支持 FD，不能用这套传输）。
  *
- * 只有状态分片，没有命令帧：业务线程 PostFrame() 分片 → 发送线程收集 →
- * 按 kStateFrags[] 表聚合成一帧 → 周期整帧发出。
- * 入队携带的 tag 只是"分片类型"标签，不是上线用的 CAN ID；
- * Message.flags 是**同板内**随分片一起搬运的标志位（见 CommState.flags 位定义），
- * 发送线程聚合时并进 CommState.flags —— 不额外占上线字节，帧长与布局不变。
+ * 只有状态分片，没有命令帧：业务线程把数据发布到本板 zbus 通道，发送线程轮询
+ * 取最新值 → 按 kStateFrags[] 表聚合成一帧 → 周期整帧发出。
  *
  * 新增分片 = 加一枚举 + 一个结构体 + 表里加一行；帧长/校验/打包/解析全自动跟随。
  *
@@ -27,7 +24,6 @@
 
 #include <stdint.h>
 #include <string.h>
-#include "to_mcu_tx.hpp"
 
 namespace inter_cmd
 {
@@ -112,10 +108,10 @@ namespace inter_cmd
     {
         uint8_t yaw_angle[4];
         uint8_t yaw_omega[4];
-        uint8_t yaw_acc[4];
+        uint8_t yaw_accl[4];      // 角加速度
         uint8_t pitch_angle[4];
         uint8_t pitch_omega[4];
-        uint8_t pitch_acc[4];
+        uint8_t pitch_accl[4];    // 角加速度
     };
 
     /// 状态分片（Up）：IMU 数据（16B，偏移 47）
@@ -244,27 +240,4 @@ namespace inter_cmd
         return false;
     }
 
-    // ============ 发送接口（多线程可并发调用，底层 k_msgq 多生产者）============
-
-    /**
-     * @brief 发布一个状态分片（发送线程收集后聚合成帧）
-     * @note  载荷结构体须为裸数据（无指针/虚表），两端定义一致；
-     *        浮点字段两端字节序/格式一致（都是小端 IEEE754 即安全）。
-     * @param type    分片类型
-     * @param payload 分片载荷
-     * @param flags   随分片搬运的同板内标志位（当前只有自瞄分片用：
-     *                kCommFlagVisionOk / kCommFlagVisionFire，见 CommState.flags）
-     * @return true = 已入队；false = 队列满，该帧被丢弃（调用方可计数）
-     */
-    template <typename T>
-    inline bool PostFrame(FrameType type, const T &payload, uint8_t flags = 0)
-    {
-        static_assert(sizeof(T) <= 64, "payload exceeds CAN FD max 64B");
-        topic::to_mcu_tx::Message msg{};
-        msg.tag = static_cast<uint8_t>(type);      // 分片类型标签（非上线 ID）
-        msg.len = sizeof(T);
-        msg.flags = flags;
-        memcpy(msg.data, &payload, sizeof(T));
-        return k_msgq_put(&user_can2_msgq, &msg, K_NO_WAIT) == 0;
-    }
 }
