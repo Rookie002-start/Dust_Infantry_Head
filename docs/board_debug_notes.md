@@ -145,7 +145,7 @@ $HOME/openocd-hpm/bin/openocd \
 | `gdb-attach` | `boards/hpm5300evk.cfg` 里写的是 `gdb-attach { reset halt }`，**一挂 GDB 就复位芯片**。手动"只看不动"时要覆盖成 `{halt}` |
 | `resume` 报错 | 目标没被 halt 时 `resume` 会报 `Not halted` 并让 openocd 退出，所以必须用 `catch` 包住 |
 | 目标名 | `hpm5361.cpu0`（CHIPNAME 未设置时 soc/hpm5300.cfg 的默认值） |
-| 运行中读不了内存 | HPM 上读内存在目标运行时全部失败（`Failed to read priv register`），**必须先 halt** |
+| 运行中读不了内存 | OpenOCD 自己的内存访问（`mdw` / sysbus / abstract / progbuf）在目标运行时全失败（`Failed to read priv register`）。**绕开它、直接用 DM 的 SBA（见 9.1 / `boards/hpm/hpm5361icb/rtt-sba.tcl`）就能不停 CPU 读**；只有 SBA 不可用时才需要 halt |
 
 ### 3.3 暂停/恢复的代价（很重要）
 
@@ -426,15 +426,32 @@ riscv64-zephyr-elf-addr2line -f -C -e build/zephyr/zephyr.elf 0x80013e2a
 ### 9.1 上板（RISC-V）：用 `tools/rtt_hpm.py`
 
 OpenOCD 的 `rtt setup/start/server` 只对 ARM 目标注册，RISC-V 上没有；
-而且 HPM 上**运行中读不了内存**，所以脚本做法是
-`halt → 按 SEGGER RTT 协议读控制块和上行缓冲 → 写回 RdOff → resume`：
+脚本按 SEGGER RTT 协议自己读控制块和上行缓冲，默认用 **DM 的 SBA**
+（`rtt-sba.tcl` 里的 `rtt_sba_read` / `rtt_sba_write`，直接操作 `sbcs` / `sbaddress0` / `sbdata0`），
+**hart 全程 running，CPU 不停**（实测 0.5~0.9 KiB/s，读到的内容和 halt 后的 `mdw` 逐字一致）。
+只有 SBA 不可用时才回退到 `halt → 读 → 写回 RdOff → resume`：
 
 ```bash
 cd ~/zephyrproject/projects/infantry_head
 python3 tools/rtt_hpm.py -e build/zephyr/zephyr.elf --port 4445            # 持续看
 python3 tools/rtt_hpm.py -e build/zephyr/zephyr.elf --port 4445 --once     # 只看控制块
 python3 tools/rtt_hpm.py ... --log /tmp/rtt.log                            # 同时存盘
+python3 tools/rtt_hpm.py ... --poll-ms 200                                 # 想更实时（默认 1000ms）
+python3 tools/rtt_hpm.py ... --halt                                        # 强制停下 CPU 读（对比用）
 ```
+
+SBA 读的坑（都写在 `rtt-sba.tcl` 顶部）：`sbcs` 位定义和标准 DM 不一样，
+要同时置 bit15+bit18 才是 32 位访问；bit20 必须清；每读一个字都要重写 `sbaddress0`，
+且第一次读 `sbdata0` 拿到的是上一次的结果（要读两次取第二次）。
+提速与刷新率：瓶颈是探针 USB 往返（每个 DMI 事务约 3ms，8MHz 只快 12%），
+所以用「写下一个地址 + 读」的流水线把每字从 3 次 DMI 降到 2 次（实测
+稳 0.45~0.5 KB/s → 快 0.6~0.85 KB/s，两种协议读同一段内存逐字一致）；
+读取器还会在一轮里把积压连续读空、并把读取时间算进 `--poll-ms`，
+默认 1s 周期 = 新日志最多晚 1s 出现，`--poll-ms 200` 实测也稳（读取时 `targets` 全程 running）。
+⚠️ SBA 只能读 RAM：读 XIP flash 这类地址会把 DM 的 SBA 引擎卡死（之后全是陈旧数据，
+写 `sbcs` 也救不回来）。恢复要**整机复位**：`riscv dmi_write 0x10 0x3` 再 `riscv dmi_write 0x10 0x1`
+（`dmcontrol.ndmreset`）或断电；实测只拉 SRST（`reset halt` / `tools/rtt.sh -r`）清不掉。
+读 RTT 缓冲（RAM）不会碰到这条。
 
 ### 9.2 下板（Cortex-M）：OpenOCD 原生 RTT
 
@@ -446,7 +463,8 @@ nc localhost 9090            # 或 python socket 读一段时间
 
 - **RTT 通道是有限的环形缓冲**，高频打印会把 LOG_* 冲掉；
   上板实测被一条每秒数条的浮点打印刷屏，排查时容易误判"没有日志"。
-- 做速率测量期间不要同时开 RTT 读取（它也会 halt/resume），否则污染测量。
+- 默认（SBA）读取不会停 CPU，做速率测量时影响远小于以前；但 `--halt` 模式仍然会 halt/resume，
+  测量期间不要开着它，否则污染测量。
 
 ---
 
@@ -573,7 +591,7 @@ if (remain > 0) k_msleep(remain);      // k_msleep(1) 实际睡 2~3 个 tick
 | `Address already in use`（3333/4444/6666） | 另一个 OpenOCD（下板 / VS Code）在跑 | 换端口，或先停掉对方 |
 | `invalid command name "gdb"` | 系统版 OpenOCD 用 `gdb_port` | 改成 `gdb_port/telnet_port/tcl_port`，或干脆用默认值 |
 | 一挂 GDB 芯片就复位 | cfg 里 `gdb-attach { reset halt }` | 覆盖成 `{halt}` |
-| `Failed to read priv register` | HPM 运行中读内存 | 先 `halt`，读完 `resume` |
+| `Failed to read priv register` | HPM 运行中读内存（OpenOCD 的访问路径不行） | 用 `rtt-sba.tcl` 的 SBA 读；实在不行再 `halt` → 读 → `resume` |
 | `Cannot insert hardware breakpoint` | 这块核 + 该 OpenOCD 不支持 | 不用断点，改读寄存器/变量 |
 | `target not halted` / `resume` 报错导致 openocd 退出 | 目标本来就在跑 | 用 `if {[catch {resume} msg]}` 包住 |
 | FIFO 满/丢帧标志总是置位 | **你自己的 halt 造成的** | 用长窗口静置 + 应用计数器 |

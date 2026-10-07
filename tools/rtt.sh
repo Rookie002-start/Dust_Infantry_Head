@@ -25,7 +25,8 @@
 #
 # HPM5361(RISC-V) 说明：OpenOCD 的 rtt setup/start 只对 ARM 目标注册，HPM 上没有，
 #   所以本脚本在 HPM 板上只负责把 OpenOCD 拉起来（telnet 4444），
-#   RTT 数据由 tools/rtt_hpm.py 读取（halt→读缓冲→resume，因为该平台运行中读不了内存）。
+#   RTT 数据由 tools/rtt_hpm.py 读取。默认走调试模块的 SBA（system bus access）读内存，
+#   CPU 全程不停；只有 SBA 不可用时才回退到 halt→读缓冲→resume。
 
 set -euo pipefail
 
@@ -201,9 +202,13 @@ fi
 if [[ "${IS_HPM}" == "1" ]]; then
     # RISC-V：OpenOCD 没有目标侧 RTT（rtt setup/start 只对 ARM 目标注册），
     # 这里只把目标跑起来、留着 telnet 口，实际读取交给 tools/rtt_hpm.py。
-    # ⚠️ 读取器要靠 halt 读内存，JTAG 速度直接决定 halt 时长（500kHz 读 512B ≈ 1.5s！
-    #    会让固件几乎停摆，表现为 CAN TX 缓冲区满 / USB 丢包），所以和烧录一样提到 4MHz。
-    OCD_CMDS+=(-c "adapter speed 4000" -c 'if {[catch {resume} msg]} { echo "resume: $msg" }')
+    # 读取器默认走 SBA（不停 CPU），但 halt 回退路径的时长也由 JTAG 速度决定
+    # （500kHz 读 512B ≈ 1.5s，会让固件几乎停摆），所以和烧录一样提到 4MHz。
+    OCD_CMDS+=(-c "adapter speed 4000")
+    # 非侵入式读取的 Tcl helper：rtt_sba_read / rtt_sba_write（见该文件注释）
+    RTT_SBA_TCL="${PROJ_DIR}/boards/hpm/${BOARD_CFG}/rtt-sba.tcl"
+    [[ -f "${RTT_SBA_TCL}" ]] && OCD_CMDS+=(-c "source ${RTT_SBA_TCL}")
+    OCD_CMDS+=(-c 'if {[catch {resume} msg]} { echo "resume: $msg" }')
     WAIT_PORT="${TELNET_PORT}"
 else
     OCD_CMDS+=(-c "rtt setup ${RTT_ADDR} ${RTT_SEARCH_SIZE} \"SEGGER RTT\"")
@@ -250,10 +255,10 @@ if [[ "${IS_HPM}" == "1" ]]; then
     echo "OpenOCD 已就绪（telnet ${TELNET_PORT}），Ctrl-C 结束。"
     echo "  查看方式 1：另开终端执行  tools/rtt_hpm.py -e ${ELF}"
     echo "  查看方式 2：tools/rtt_hpm.py --once     # 只看控制块是否被找到"
-    echo "  ⚠️ HPM 是 RISC-V：OpenOCD 无目标侧 RTT，读取器用 halt→读缓冲→resume。"
-    echo "     读取期间 CPU 会停（实测读取速度 2~3.4KiB/s），会拖慢固件："
-    echo "     默认 --poll-ms 5000，调试实时性要求高时用 --poll-ms 10000，"
-    echo "     或只在需要时短时开一下（Ctrl-C 停）。"
+    echo "  HPM 是 RISC-V：OpenOCD 无目标侧 RTT，读取器自己按 SEGGER RTT 协议读。"
+    echo "  默认走调试模块的 SBA（system bus access）：CPU 全程不停，读取 0.5~0.9KiB/s（每字 2~3 次 DMI 事务）。"
+    echo "  拿不到 SBA 时会自动回退到 halt→读缓冲→resume（那会真的把 CPU 停住）。"
+    echo "  默认 1000ms 轮询一次、有新数据就连续读空；想更实时用 --poll-ms 200，想省总线就调大。"
 
     if [[ "${VIEW}" == "1" ]]; then
         python3 "${PROJ_DIR}/tools/rtt_hpm.py" -e "${ELF}" --port "${TELNET_PORT}" || true

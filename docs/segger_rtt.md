@@ -190,11 +190,14 @@ OpenOCD 的 `-c` 命令一旦返回错误，它就会**直接退出**。典型�
 1. OpenOCD 的「目标侧 RTT」（`rtt setup` / `rtt start`）**只对 ARM 目标注册**；
    在 HPM 上 `init` 之后 `help rtt` 也只有 `rtt server`，没有 setup/start。
 2. 本机 OpenOCD 在 HPM5361 上**运行中读不了内存**：`sysbus` / `abstract` / `progbuf`
-   三种访问方式都报 `Failed to read priv register`，必须 `halt` 才能读。
-   （调试模块本身支持 SBA：`dmstatus=0x430ca2`，`sbvers=2`，是 OpenOCD 的 RISC-V 路径限制。）
+   三种访问方式都报 `Failed to read priv register`（调试模块本身支持 SBA：`dmstatus=0x430ca2`，
+   `sbvers=2`，是 OpenOCD 的 RISC-V 路径限制）。
+   **但绕过 OpenOCD 的内存访问层、直接操作 DM 的 SBA（`boards/hpm/hpm5361icb/rtt-sba.tcl`）
+   可以在 hart 全程 running 的情况下读内存**，所以 RTT 读取不再需要 halt。
 
 所以 HPM 走 **`tools/rtt_hpm.py`**：按 SEGGER RTT 协议自己读控制块和环形缓冲，
-节拍是 `halt → 读缓冲 → 回写 RdOff → resume`（默认 200ms 一次，每轮最多读 512 字节）。
+节拍是「读 WrOff → 读缓冲 → 回写 RdOff」，默认走 SBA，**CPU 不停**（实测 0.5~0.9 KiB/s）；
+只有 SBA 不可用时才回退到 `halt → 读 → resume`（那会让 CPU 真的停住）。
 控制块地址（`_SEGGER_RTT`）直接从 ELF 里取，RISC-V 上它落在普通 `.bss`（没有 `.rtt_buff_data` 段）。
 
 ```bash
@@ -204,15 +207,33 @@ west build -d build            # 板级 conf 已开 CONFIG_DEBUG_RTT
 tools/rtt.sh                   # 终端 A：拉起 OpenOCD（telnet 4444），保持不退
 tools/rtt_hpm.py -e build/zephyr/zephyr.elf   # 终端 B：读日志（Ctrl-C 退出）
 #   tools/rtt_hpm.py --once    # 只看控制块信息，排查"固件里到底有没有 RTT"
-#   tools/rtt_hpm.py --poll-ms 500   # 觉得 halt 太频繁就把周期调大
+#   tools/rtt_hpm.py --poll-ms 200   # 想更实时（默认 1000ms）
+#   tools/rtt_hpm.py --poll-ms 10000 # 觉得读取太占总线就把周期调大
+#   tools/rtt_hpm.py --safe-read     # 只用最稳的 3 次 DMI/字协议（默认会自动尝试流水线加速）
+#   tools/rtt_hpm.py --halt          # 强制用 halt→读→resume（对比/排查用）
 ```
 
 注意事项：
 
-* **每轮 `halt` 期间 CPU 是停的**，实测读取速度只有 2~3.4 KiB/s（`dump_image`，`mdb` 更慢），
-  所以"持续读取"会占掉固件 10%+ 的时间，表现为 CAN TX 缓冲区满 / USB 丢包变多。
-  默认 `--poll-ms 5000`（约 13 s 积压才开始丢），调试时也可以只在需要时开一下、看完就 Ctrl-C；
-  要"零打扰"就得用 J-Link（见下）；
+* **默认读取方式不会停 CPU**：SBA 走调试模块，hart 一直 running（`targets` 实测全程 `running`），
+  代价是 0.5~0.9 KiB/s 的读取速度（瓶颈是探针的 USB 往返，每个 DMI 事务约 3ms；JTAG 提到
+  8MHz 只快 12%，所以默认还是 4MHz）；
+* **刷新延迟 ≈ `--poll-ms`**：一轮里会把积压的数据连续读空（最多 `--drain-ms`），
+  读掉的时间算在周期里，所以默认 1000ms 就是"新日志最多晚 1s 出现"。
+  日志不多时 `--poll-ms 200` 也很轻松；日志很多时按 0.5~0.9KiB/s 的吞吐量反推周期即可；
+* 如果日志里出现 `[warn] 非侵入式 SBA 读取不可用`，说明回退到了 `halt → 读 → resume`，
+  那每轮都会把 CPU 停几十~几百毫秒（表现为 CAN TX 缓冲区满 / USB 丢包变多），
+  这时优先检查 `tools/rtt.sh` 有没有把 `boards/hpm/hpm5361icb/rtt-sba.tcl` 载进去；
+  回退后轮询周期会自动放宽到 5s（除非显式给了 `--poll-ms`）；
+* ⚠️ **SBA 只能读 RAM**：别用 `rtt_sba_*` 去读 XIP flash（`0x80000000` 段）之类 SBA 到不了的地址，
+  会把 DM 的 SBA 引擎卡死（之后所有读都返回陈旧数据）。读取器只会读 RTT 控制块/缓冲（都在 RAM），
+  踩不到。真要卡住了，恢复办法是**整机复位**：telnet 里发
+  `riscv dmi_write 0x10 0x3` 再 `riscv dmi_write 0x10 0x1`（`dmcontrol.ndmreset`），或断电；
+  实测只拉 SRST（`tools/rtt.sh -r` / `reset halt`）清不掉。
+  读取器会自检：读不动先原地重试，连续失败才退回 halt 方式并提示；退回后每 30s 再试 SBA，
+  能用了自动切回不停 CPU 的方式；
+* 同一颗 `sbcs` 上还有一条坑：**别去写 bit20**（"顺手清 sberror" 的写法），
+  这颗 DM 上 bit20 一置上去访问就退化成 8 位，读出来全是脏数据；
 * 日志量超过 4KB 缓冲而没及时读，会提示 `缓冲区被覆盖，丢了 N 字节`；
 * **探针假死**（`CMSIS-DAP command CMD_INFO failed`）：跑一次
   `sudo /usr/local/sbin/hpm-probe-usb reset` 即可恢复（烧录用的 wrapper 会自己做，但它
