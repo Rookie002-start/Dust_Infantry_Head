@@ -5,90 +5,6 @@
  * @version 1.0
  * @date 2026-09-21
  *
- * ## 机构与电机
- *
- * | 机构 | 电机 | 电调 | 反馈 ID | 控制帧槽位 |
- * |------|------|------|---------|-----------|
- * | 拨弹盘 | M2006 | C610 | 0x201 | 0x200 第 0 槽 |
- * | 摩擦轮 A | M3508 | C620 | 0x202 | 0x200 第 1 槽 |
- * | 摩擦轮 B | M3508 | C620 | 0x203 | 0x200 第 2 槽 |
- *
- * 三个电调共用控制帧 0x200（DJI 协议：反馈 0x20n ↔ 控制帧第 n-1 槽），所以一拍只发一帧。
- *
- * ## 弹丸计数（外部中断）
- *
- * 弹丸检测引脚（overlay 里 `/zephyr,user` 的 `booster-shoot-irq-gpios`，PA18，上升沿有效）接 GPIO 中断：
- * **一簇密集的上升沿（≥kShootIrqClusterMin 根、间隔 ≤kShootIrqClusterMs）= 一发弹丸通过**
- * （`instance::booster::shot_count` +1）：零散单根沿当干扰丢掉，距上一发不足"当前并窗"的
- * 密簇（同一发的余振）并进前一发。并窗 = 实测射速间隔 − 余量、夹在 [min,max] 内，
- * 也就是**自适应**的。判据的实测依据见 kShootIrqClusterMs 上方的说明。
- * 中断里只做一次 atomic 自增，控制环不介入；PC 链路线程把它填进自瞄上行包的 bullet_count。
- *
- * ## 控制数据语义（topic::remote_to，本线程轮询读取）
- *
- * | 字段 | 语义 | 本线程行为 |
- * |------|------|-----------|
- * | `shoot_ctrl`    | **开火** | 按住进弹（需摩擦轮 READY），松开立即停；自瞄开火同样触发 |
- * | `autoaim_ctrl`  | **自瞄开关** | ON 才允许 PC 自瞄请求（mode=2）开火 |
- * | `reload_ctrl`   | **退弹** | 拨弹盘反转，不需要摩擦轮到速 |
- * | `friction_ctrl` | **摩擦轮开关** | 按下沿切换 ON/OFF；ON 后升速到 kFrictionOmega |
- * | `stop`          | **失能状态位** | 置位 → 整机构失能：零电流 + 清 PID 积分 + 摩擦轮开关复位 |
- *
- * 摩擦轮用四态软开关（Idle/Spinup/Ready/Fault）：失能或掉线一律回 Idle，
- * 恢复后必须重新手动按一次才会转。
- *
- * `stop` 当前取遥控三态开关的停止位（见 IsStop()）；将来协议单独给出 stop 位时只改 IsStop()。
- *
- * ## 数据来源与所有权
- *
- * | 数据 | 通道 / 段 | 生产者 | 本线程的角色 |
- * |------|-----------|--------|--------------|
- * | 遥控指令 | zbus `pub_remote_to` | thread/remote | 轮询读（状态通道无订阅者） |
- * | 自瞄开火 | zbus `pub_pc_to` | thread/pc | 轮询读（mode=2 且链路新鲜 → 开火） |
- * | 电机反馈 | `.can_rx3` 段 | 本线程（总线所有者） | 只注册 CAN_RX_HANDLER |
- * | 控制电流 | k_msgq `user_can3_msgq` | 本线程 | 入队后本线程外发 |
- * | 弹丸检测 | PA18 上升沿中断 | GPIO ISR（本文件 ShootIrqIsr） | 中断里 `shot_count` +1 |
- *
- * ⚠️ 本线程是 user-can3 总线的所有者：Init 与收帧分发入口都在这里，
- *    其它线程只能注册 CAN_RX_HANDLER，不要再 Can::Init() / SetRxCallback()。
- *
- * ## 控制流
- *
- *     ReadCommand()      遥控 → fire / friction / stop + 链路判活
- *         ↓
- *     UpdateTarget()     摩擦轮目标 ω；拨弹盘射频节拍 + 到速门控 + 卡弹反转
- *         ↓
- *     ControlCalculate() 三台电机速度环 → 电流 (A)
- *         ↓
- *     FramePublish()     3 × int16 组帧（0x200）→ 队列 → FlushTx() 发到 can3
- *
- * ## 失能 / 安全策略
- *
- *   · `stop` 置位、或遥控掉线（kLinkTimeoutMs 内没有新的遥控帧）：摩擦轮停转、拨弹盘停转，
- *     清 PID 积分并强制零电流；控制帧照发（0 电流），电调不会因为超时进保护；
- *   · 摩擦轮没到速（未进 READY）不允许进弹，避免弹速不稳 / 卡弹；
- *   · 摩擦轮开关在失能 / 掉线时复位为 OFF，恢复后需重新手动开；
- *   · 拨弹盘堵转（有电流、几乎不转）超过 kJamDetectMs → 反转 kJamReverseMs 退弹后恢复；
- *   · 电流先限幅再换算成电调原始值（越界会整数回绕）。
- *
- * ## 待实测参数（占位值，实车标定后锁定）
- *
- * | 参数 | 当前值 | 说明 |
- * |------|--------|------|
- * | `kFrictionGearRatio` | 1.0 | 摩擦轮直驱（M3508 拆减速箱）；若轮子装在 19.2:1 输出轴上改 3591/187 |
- * | `kFrictionOmega` | 500 rad/s | 弹速 ≈ ω × r_轮（r = 0.03 m → ≈15 m/s） |
- * | `kFeederOmega` | 15 rad/s | 输出轴角速度（M2006 空载 ≈17.5 rad/s） |
- * | `kShotIntervalMs` / `kFeedPulseMs` | 100 / 70 ms | 射频上限 10 发/s；每发拨弹角 ≈ ω × t_脉冲 |
- * | 摩擦轮电流限幅 | 12 A | C620 上限 20 A |
- * | 拨弹盘电流限幅 | 6 A | C610 上限 10 A |
- * | 摩擦轮速度环 | kp=0.05 / ki=0.02 | 输出 = 电流 A，待整定 |
- * | 拨弹盘速度环 | kp=0.5 / ki=0.1 | 输出 = 电流 A，待整定 |
- *
- * ## 待办
- *
- *   · 反馈超时保护：DJI 模块没有反馈时间戳，ESC 掉线时速度环会顶到电流限幅，
- *     等模块补上"反馈新鲜度"后再在此处断流；
- *   · 弹速闭环 / 热量限制需要弹速传感器与裁判系统数据，暂未接入。
  *
  * @copyright Copyright (c) 2026
  */
@@ -241,6 +157,7 @@ static constexpr float kFeederOmega = 5.0f;
 // 单发节拍：每 kShotIntervalMs 启动一发，单发持续进弹 kFeedPulseMs
 static constexpr uint32_t kShotIntervalMs = 100;   // 射频上限 = 1000 / kShotIntervalMs
 static constexpr uint32_t kFeedPulseMs    = 70;    // 每发拨弹角 ≈ kFeederOmega × kFeedPulseMs
+static constexpr uint32_t kFeederRxTimeoutMs = 20; //拨弹盘电机反馈最大超时时间
 
 // ==================== 电流限幅（保护机构与电调）====================
 static constexpr float kFrictionCurrentMax = 12.0f;   // A（C620 上限 20 A）
@@ -249,7 +166,7 @@ static constexpr float kFeederCurrentMax   = 6.0f;    // A（C610 上限 10 A）
 static constexpr float kFrictionOmegaKp = 0.5f;   // 摩擦轮速度环 kp
 static constexpr float kFrictionOmegaKi = 0.2f;   // 摩擦轮速度环 ki
 static constexpr float kFeederOmegaKp   = 0.5f;    // 拨弹盘速度环 kp
-static constexpr float kFeederOmegaKi   = 0.05f;    // 拨弹盘速度环 ki
+static constexpr float kFeederOmegaKi   = 0.0f;    // 拨弹盘速度环 ki
 
 // ==================== 遥控链路 ====================
 /// 遥控数据新鲜度阈值（与遥控模块自己的 100 ms 超时同量级）
@@ -295,6 +212,8 @@ static float g_friction_target = 0.0f;                 ///< 摩擦轮目标 ω r
 static float g_feeder_target   = 0.0f;                 ///< 拨弹盘目标 ω rad/s
 static float g_feeder_current  = 0.0f;                 ///< 拨弹盘速度环输出电流 A（诊断用）
 static float g_friction_current[kFrictionCount] {};    ///< 摩擦轮速度环输出电流 A
+static bool      g_feeder_active = false;                 ///< 本拍是否真的在进弹/退弹
+static atomic_t  g_feeder_rx_ms  = ATOMIC_INIT(0);        ///< 最近一帧 0x201 的时刻
 
 static uint32_t g_drop    = 0;            ///< 队列满丢帧计数
 static uint32_t g_tx_fail = 0;            ///< CAN 发送失败计数
@@ -557,13 +476,13 @@ static void UpdateTarget(const motor::dji::DjiC610::Snapshot &feeder_snap,
     // ---- 拨弹盘 ----
     g_feeder_target = 0.0f;
 
-    if(firing_mode && g_cmd.online && !g_cmd.stop)
-    {
+    g_feeder_active = false;
+    if (firing_mode && g_cmd.online && !g_cmd.stop) {
         g_feeder_target = -kFeederOmega;
-    }
-
-    if (reload_mode && g_cmd.online && !g_cmd.stop) {
+        g_feeder_active = true;
+    } else if (reload_mode && g_cmd.online && !g_cmd.stop) {
         g_feeder_target = kFeederOmega;
+        g_feeder_active = true;
     }
 
 }
@@ -579,7 +498,15 @@ static void ControlCalculate(const motor::dji::DjiC610::Snapshot &feeder_snap,
 {
     const bool disable = g_cmd.stop || !g_cmd.online;
 
-    if (disable) {
+    // 反馈新鲜度：0x201 超时或从没收到过 → 当掉线（无符号减法，回绕也正确）
+    const uint32_t rx_ms = (uint32_t)atomic_get(&g_feeder_rx_ms);
+    const bool feeder_fb_ok = (rx_ms != 0u) &&
+                              ((k_uptime_get_32() - rx_ms) <= kFeederRxTimeoutMs);
+
+    // 不满足任一条就"放开"：输出 0 并清积分，绝不用旧 ω 去刹车
+    const bool feeder_off = disable || !g_feeder_active || !feeder_fb_ok;
+
+    if (feeder_off) {
         feeder_omega_pid.SetIntegralError(0.0f);
         g_feeder_current = 0.0f;
     } else {
@@ -844,7 +771,11 @@ bool thread_start()
 
 // CAN 收帧注册：每个反馈 ID 一个入口（分发器只给帧数据，不给 ID）
 CAN_RX_HANDLER(BOOSTER_RX_CAN, kFeederRxId,
-               [](uint8_t *data) { feeder_motor.CanCpltRxCallback(data); }, feeder);
+               [](uint8_t *data) {
+                   atomic_set(&g_feeder_rx_ms, (atomic_val_t)k_uptime_get_32());
+                   feeder_motor.CanCpltRxCallback(data);
+               },
+               feeder);
 CAN_RX_HANDLER(BOOSTER_RX_CAN, kFrictionRxId[0],
                [](uint8_t *data) { friction_motor[0].CanCpltRxCallback(data); }, friction1);
 CAN_RX_HANDLER(BOOSTER_RX_CAN, kFrictionRxId[1],

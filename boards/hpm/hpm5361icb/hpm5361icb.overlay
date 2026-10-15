@@ -6,7 +6,7 @@
 / {
     aliases {
         booster-can = &mcan1;
-        inter-can   = &mcan3;      /* 上下板通信总线（总线所有者组件用；与 user-can2 同一节点） */
+        inter-can   = &mcan3;
         remote-uart = &uart1;
         hipnuc-uart = &uart0;   /* HiPNUC IMU：PA00/PA01（uart0），115200 8N1 */
         imu-spi     = &icm42688p;
@@ -141,10 +141,7 @@
 };
 
 &uart0 {
-    /* PA00 = UART0_TXD / PA01 = UART0_RXD（板级 pinmux_uart0，IOC ALT2）
-     * 速率/引脚/DMA 都在板级 hpm5361icb.dts 里：115200 8N1，DMA 0/1（0x14/0x15）
-     * （uart3 已停用，它原来的 4/5 通道给了 console uart2，所以 0/1 现在只归 uart0） */
-    current-speed = <115200>;
+    current-speed = <921600>;
     status = "okay";
 };
 

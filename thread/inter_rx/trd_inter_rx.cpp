@@ -8,16 +8,6 @@
  * 本组件只负责"收"：user-can2 总线由发送侧（thread/mcu_inter）持有并完成
  * Init + 设置收帧分发入口，这里只注册 CAN_RX_HANDLER。
  *
- * ⚠️ 拆帧语义：分片之间不做跨片一致性保证；某片丢失时该字节段沿用上一周期，
- *    下个周期自动补齐（对周期性状态广播可接受）。
- *
- * 消费者用法（1kHz 循环内）：
- * @code
- *   static topic::from_body::Message body{};
- *   if (zbus_chan_read(&pub_from_body, &body, K_NO_WAIT) != 0) {
- *       // 读失败 → 沿用上一轮值
- *   }
- *   if (!body.online) { /* 安全降级 *\/ } else { /* body.gimbal.yaw / body.shooter.bullet_speed *\/ }
  * @endcode
  *
  * @version 0.6
@@ -105,6 +95,11 @@ namespace thread::inter_rx
         return true;
     }
 
+    /// 主循环：睡到"绝对截止时刻"，不要用 k_msleep(period - used)。
+    /// 相对写法里的 used 只有 1ms 分辨率、又按系统 tick（0.5ms）量化：循环体不足半拍
+    /// 就读到 0，每轮白送 0.5ms 以上；被同优先级兄弟线程拖后时迟到量也不补偿
+    /// （下板 inter_rx 实测因此从 1ms 变成 2.31ms，见 docs/board_debug_notes.md 案例 3）。
+    /// 绝对截止时刻把 tick 量化与唤醒延迟一起吸收，平均周期恒为 kPollMs。
     static void Task(void*, void*, void*)
     {
         uint8_t  buf[kFrameLen] {};
@@ -113,9 +108,11 @@ namespace thread::inter_rx
         bool     ever_rx     = false;
         bool     online_prev = false;
 
+        const int64_t period = k_ms_to_ticks_ceil64(kPollMs);
+        int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
         for (;;)
         {
-            const int64_t  tick  = k_uptime_get();
             const uint32_t cnt   = static_cast<uint32_t>(atomic_get(&asm_.rx_cnt));
             const bool     fresh = (cnt != last_cnt);
             const uint32_t now   = k_uptime_get_32();
@@ -147,10 +144,13 @@ namespace thread::inter_rx
                 online_prev = online;
             }
 
-            const int64_t remain = static_cast<int64_t>(kPollMs) - (k_uptime_get() - tick);
-            if (remain > 0) {
-                k_msleep(remain);
+            // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+            if (k_uptime_ticks() < deadline) {
+                k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+            } else {
+                deadline = k_uptime_ticks();
             }
+            deadline += period;
         }
     }
 

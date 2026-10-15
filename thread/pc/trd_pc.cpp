@@ -5,36 +5,6 @@
  * @version 1.0
  * @date 2026-09-23
  *
- * ## 数据流（两个方向都只在本线程里搬运）
- *
- *     PC ─USB→ 组帧/CRC → zbus pub_pc_to（mode + yaw/pitch）
- *              ├─ mcu_inter：取 yaw/pitch 组 AutoAimState 下发下板
- *              └─ booster  ：取 mode 决定自瞄开火（kModeAimFire = 开火）
- *
- *     PC ←USB─ PCSendAutoAimData ← pub_imu_to（框架 IMU 状态通道，轮询取最新值）
- *
- * ## 为什么收发在同一个线程（而不是两个）
- *
- *   · `usb::Usb::Send()` 非阻塞：未配置/端点在忙直接返回 false，发不出去只丢帧，
- *     不会把"收"卡住；接收完全由 USB 中断 + 环形缓冲驱动，线程只负责搬运；
- *   · USB 的"已配置 / 掉线 / 总线复位"是整条链路共享的状态，收发的判活必须用同一份；
- *   · 数据本身已经解耦：出向是 pull（pub_imu_to），入向是 zbus 发布（pub_pc_to）。
- *     真需要拆线程的条件是"发送变成阻塞式或需要重传窗口"，现在不满足。
- *
- * ## PC 掉线时的行为（本线程 + mcu_inter 两侧配合，阈值都是 100ms）
- *
- *   · 本线程：连续 kLinkTimeoutMs 没有 CRC 通过的帧 → 判链路失效：
- *       ① 往 pub_pc_to 发一帧 mode=0 的空闲帧；② 发给 PC 的帧里 mode 回 0（空闲）；
- *       ③ 清掉半截帧缓冲，等 PC 重连后重新同步（不需要握手）。
- *   · mcu_inter / booster：按 pub_pc_to 的 version 判活，超时一律不认（下板回手动、
- *     自瞄停火）。这样即使 PC 拔线、PC 程序卡死，也不会拿着陈旧的自瞄量继续打。
- *   · 恢复：只要有新的 CRC 通过帧就自动恢复（数据自带有效性位），不需要重新握手。
- *
- * ## 待接入（不影响当前功能）
- *
- *   · bullet_speed：取 pub_from_body（下板实测弹速），下板还没发布时恒 0；
- *   · bullet_count：取发射机构线程的累计进弹次数，没开 CONFIG_TRD_BOOSTER 时恒 0；
- *   · 上板是否要用遥控自瞄开关（autoaim_ctrl）再门控一次，待定；当前不做门控。
  *
  * @copyright Copyright (c) 2026
  */
@@ -57,6 +27,7 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <math.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -276,8 +247,8 @@ static bool SendToPc()
                             ? pc_proto::kSendModeAim
                             : pc_proto::kSendModeIdle;
 
-    for (uint8_t i = 0; i < 4; ++i) {
-            PC_Send_Data.q[i] = g_imu.quaternion[i];
+    for(uint8_t i = 0; i < 4; ++i) {
+        PC_Send_Data.q[i] = g_imu.quaternion[i];
     }
 
     PC_Send_Data.yaw.yaw_ang     = g_imu.yaw_total;   // 累计偏航（可跨圈）：世界系连续角，自瞄解算用
@@ -290,11 +261,13 @@ static bool SendToPc()
         reinterpret_cast<uint8_t *>(&PC_Send_Data),
         static_cast<uint32_t>(offsetof(PCSendAutoAimData, crc16)),
         0xFFFFU);
-
+    // printk("yaw:%f\r\n", PC_Send_Data.yaw.yaw_ang);
+    // printk("pitch:%f\r\n", PC_Send_Data.pitch.pitch_ang);
+    // printk("roll:%f\r\n", g_imu.roll);
     if (!usb_.Send(reinterpret_cast<const uint8_t *>(&PC_Send_Data), sizeof(PC_Send_Data))) {
         if ((++g_tx_fail % kDropLogPeriod) == 1u) {
-            LOG_WRN("usb tx drop (not configured / ep busy), total %u",
-                    static_cast<unsigned>(g_tx_fail));
+            // LOG_WRN("usb tx drop (not configured / ep busy), total %u",
+            //         static_cast<unsigned>(g_tx_fail));
         }
         return false;
     }

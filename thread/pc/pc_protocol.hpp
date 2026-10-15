@@ -5,30 +5,6 @@
  * @version 1.0
  * @date 2026-09-23
  *
- * ## 传输与组帧
- *
- * USB CDC ACM 批量端点：字节流、没有消息边界 → **定长帧 + 双字节帧头 + CRC16** 自同步。
- * 两个方向都是定长、小端、1 字节对齐布局：
- *
- *     'S' 'P' | 载荷 | crc16(小端)
- *
- * crc16 = 表驱动 CRC16（DJI/RoboMaster 风格：poly 0x1021 的反射表 0x8408，
- *         init 0xFFFF，输入/输出按位反射，末尾不异或；标准名 CRC-16/MCRF4XX）
- *         覆盖范围：帧头起、到 crc16 字段之前的所有字节（见 pc_proto::Crc16）
- *         ⚠️ 它**不等于** CRC16-CCITT-FALSE：同一串 "123456789" 本实现得 0x6F91、
- *            CCITT-FALSE 得 0x29B1。PC 侧两个方向都必须用同一张 wCRC_Table，
- *            否则整帧会被判坏帧丢弃（发送方算的值和接收方校验的值必须一致）。
- *
- * ## 与 PC 侧对齐（三处必须一致，任一处不一致 → 整帧被判坏帧丢弃）
- *
- *   ① 结构体 1 字节对齐：本文件用 `#pragma pack(push,1)/(pop)` 包住，
- *      PC 侧同样要 `#pragma pack(1)`，不要用默认对齐 —— 默认对齐会在 mode 后面、
- *      crc16 前面插填充字节。注意：只给外层结构体加 `__attribute__((packed))`
- *      **不够**（内层匿名结构体仍按自己的对齐规则排布），必须用 pack(1)。
- *   ② CRC 算法、参数（同一张 wCRC_Table）与覆盖范围同上；
- *   ③ 小端字节序（MCU 与 PC 都是小端，用同样的结构体即可）。
- *
- * 帧长由 static_assert 锁死：上板→PC = 43B，PC→上板 = 29B。
  *
  * @copyright Copyright (c) 2026
  */
@@ -55,7 +31,9 @@ struct PCSendAutoAimData
 
     uint8_t mode = 0;               // 0-空闲 1-自瞄
 
-    float q[4];                     // 四元数姿态[w,x,y,z]
+    float q[4];                     // 四元数姿态[w,x,y,z]：由 yaw/pitch/roll 手算，ZXY 轴序
+                                    // （q=qz(yaw)·qx(pitch)·qy(roll)，与 hipnuc 原始四元数同约定），
+                                    // PC 侧需用 ZXY 反解；见 trd_pc.cpp 的 QuatFromYawPitchRoll
 
     struct
     {
