@@ -14,6 +14,7 @@ list(APPEND BOARD_ROOT "${CUSTOM_BOARDS_DIR}")
 list(APPEND BOARD_ROOT "${ZEPHYR_USER_DIR}")
 list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}")
 list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}/dts")
+list(APPEND DTS_ROOT   "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---- (3) ZEPHYR_EXTRA_MODULES（通用：framework + platform/cmsis）------------
 set(ZEPHYR_EXTRA_MODULES
@@ -57,6 +58,23 @@ foreach(_dir IN LISTS BOARD_GLOBAL_INCLUDES)
   zephyr_include_directories(${_dir})
 endforeach()
 target_compile_options(app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>)
+
+# ---- (6.0) Generic watchdog supervisor -------------------------------------
+if(CONFIG_WDT_SUPERVISOR)
+  zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/watchdog)
+  target_sources(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/supervisor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/health.cpp
+  )
+endif()
+
+# ---- (6.0.1) HPM53 EWDG adapter --------------------------------------------
+if(CONFIG_WDT_HPMICRO)
+  target_sources(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/adapters/hpmicro/wdt_hpmicro.c
+    ${HPM_SDK_DIR}/drivers/src/hpm_ewdg_drv.c
+  )
+endif()
 
 # ---- (6.1) SEGGER RTT：补上 printf API 与头文件路径 -------------------------
 # SEGGER_RTT.c / SEGGER_RTT_zephyr.c 由 Zephyr 自带的模块胶水编译，

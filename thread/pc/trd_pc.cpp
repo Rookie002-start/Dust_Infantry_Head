@@ -17,6 +17,9 @@
 #include "pc_to.hpp"
 #include "imu_to.hpp"
 #include "usb.hpp"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 
 #if defined(CONFIG_DUST_TPC_FROM_BODY)
 #include "from_body.hpp"        // bullet_speed 来源（下板实测弹速）
@@ -286,6 +289,9 @@ static void Task(void*, void*, void*)
 {
     for (;;)
     {
+#if defined(CONFIG_WDT_SUPERVISOR)
+        wdg_health::Mark(wdg_health::Service::Pc);
+#endif
         const int64_t tick_start = k_uptime_ticks();
 
         // ① 收：USB 中断已把字节压进环形缓冲，这里等通知（超时 = 主循环节拍）

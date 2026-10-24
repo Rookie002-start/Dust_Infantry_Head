@@ -20,6 +20,9 @@
 #include "pc_to.hpp"          // pull 来源：PC 自瞄通道
 #include "can.hpp"
 #include "Irq_handlers.h"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -139,7 +142,7 @@ namespace thread::mcu_inter
     /// imu.yaw_total / imu.pitch 同参考系，所以正常是 +1）。
     /// 若 PC 的偏差正方向与下发的角度相反，把对应项取 -1。
     static constexpr float kAimYawErrSign   = +1.0f;
-    static constexpr float kAimPitchErrSign = +1.0f;
+    static constexpr float kAimPitchErrSign = -1.0f;
 
     /// 自瞄 pitch 绝对目标软限位：必须与下板 trd_gimbal.cpp 的 kPitchMin / kPitchMax 一致。
     /// 在这里先夹住，避免目标顶出界后下板软限位一直压着、要等目标自己绕回来才动。
@@ -318,6 +321,9 @@ namespace thread::mcu_inter
 
         for (;;)
         {
+#if defined(CONFIG_WDT_SUPERVISOR)
+            wdg_health::Mark(wdg_health::Service::McuInter);
+#endif
             // 1) 拉取通道来源的分片
             RefreshFromChannels();
 

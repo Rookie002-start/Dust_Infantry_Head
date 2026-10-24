@@ -17,6 +17,9 @@
 #include "remote_to.hpp"
 #include "pc_to.hpp"
 #include "can.hpp"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 
 #include <algorithm>
 #include <math.h>
@@ -646,8 +649,10 @@ static void Task(void*, void*, void*)
 {
     for (;;)
     {
+#if defined(CONFIG_WDT_SUPERVISOR)
+        wdg_health::Mark(wdg_health::Service::Booster);
+#endif
         const int64_t tick_start = k_uptime_ticks();
-
         ReadCommand();
 
         // 每台电机一拍一次快照：转速与电流必须来自同一帧

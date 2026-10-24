@@ -18,6 +18,7 @@
 
     chosen {
         zephyr,console = &uart2;
+        zephyr,watchdog = &ewdg0;
     };
 
     /* 弹丸检测输入（对射光电 / 微动开关）：PA18，每次上升沿 = 一发弹丸通过。
@@ -56,6 +57,17 @@
             label = "PWM1 CH3";
             status = "okay";
         };
+    };
+};
+
+&{/soc} {
+    ewdg0: watchdog@f00b0000 {
+        compatible = "hpmicro,hpm-ewdg";
+        reg = <0xf00b0000 0x4000>;
+        interrupts = <32 1>;
+        interrupt-parent = <&plic>;
+        clk-name = <CLOCK_WATCHDOG0>;
+        status = "okay";
     };
 };
 
@@ -130,12 +142,18 @@
 &mcan3 {
     /* 上下板通信总线 owner（thread/inter_bus 用的 inter-can）。
      * 位率必须与下板逐项一致（下板在 board_dm_mc02 的 &fdcan2 里）：
-     *   仲裁段 1Mbps @ 采样点 80%，数据段 2Mbps @ 采样点 75%。
+     *   仲裁段 1Mbps @ 采样点 80%，数据段 4Mbps @ 采样点 75%。
      * ⚠️ bitrate-data / sample-point(-data) 只在 CONFIG_CAN_FD_MODE=y 时才会被
      *    HPM 驱动用上（见 hpm5361icb.conf 里那段说明），否则 DBTP 根本不被编程。 */
+    /* CAN 内核时钟从前面的 24MHz 晶振换成 PLL0_CLK0(960MHz) ÷ 8 = 120MHz：
+     * 24MHz 下 4Mbps 只有 6 tq/bit，采样点凑不进 70~80% 窗口（SDK 直接返回
+     * invalid_argument，MCAN 起不来）；120MHz 下 4Mbps = 30 tq/bit，
+     * 75%±5% 窗口内可选 21~24 tq，tseg1 也够长（> 收发器环路延迟）。 */
+    clk-source  = <CLK_SRC_PLL0_CLK0>;
+    clk-divider = <8>;
     bitrate = <1000000>;
     sample-point = <800>;
-    bitrate-data = <1000000>;
+    bitrate-data = <4000000>;
     sample-point-data = <750>;
     status = "okay";
 };

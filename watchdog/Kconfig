@@ -1,0 +1,46 @@
+menu "Watchdog supervisor"
+
+config WDT_SUPERVISOR
+	bool "Portable watchdog supervisor"
+	default n
+	select WATCHDOG
+	help
+	  Aggregate service heartbeats and feed the selected Zephyr watchdog.
+
+config WDT_SUPERVISOR_FEED_PERIOD_MS
+	int "Watchdog feed period (ms)"
+	depends on WDT_SUPERVISOR
+	default 50
+	range 50 5000
+
+config WDT_SUPERVISOR_TIMEOUT_MS
+	int "Watchdog reset timeout (ms)"
+	depends on WDT_SUPERVISOR
+	default 2000
+	range 200 60000
+
+config WDT_SUPERVISOR_HEALTH_WARMUP_MS
+	int "Watchdog health warm-up (ms)"
+	depends on WDT_SUPERVISOR
+	default 1000
+	range 200 10000
+
+endmenu
+
+menu "HPM EWDG driver"
+
+config WDT_HPMICRO
+	bool "HPM53 EWDG hardware driver"
+	default n
+	depends on DT_HAS_HPMICRO_HPM_EWDG_ENABLED
+	select WATCHDOG
+	help
+	  Enable the HPM EWDG driver through the Zephyr watchdog API.
+
+config WDT_HPMICRO_WARNING_MS
+	int "EWDG pre-reset warning lead (ms)"
+	depends on WDT_HPMICRO
+	default 100
+	range 50 1000
+
+endmenu
