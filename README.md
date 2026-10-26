@@ -1,4 +1,4 @@
-# infantry_head
+# Dust_Infantry_Head
 
 RoboMaster 步兵机器人**上板**固件，基于 Zephyr + Dust 架构。
 
@@ -26,5 +26,5 @@ west build -b stm32h723vgt6 -- -DBOARD_CFG=board_dm_mc02
 ## 说明
 
 与下板通过 CAN FD 通信（仲裁段 1 Mbps / 数据段 2 Mbps），协议定义在
-`inter_cmd/inter_cmd.hpp`，必须与 infantry_body 中的同名文件保持一致。
+`inter_cmd/inter_cmd.hpp`，必须与 Dust_Infantry_Body 中的同名文件保持一致。
 SEGGER RTT 日志与板卡调试说明见 `docs/`。

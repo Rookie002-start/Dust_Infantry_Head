@@ -6,7 +6,7 @@
 适用场景：CAN 收发不通、外设没反应、怀疑时钟/引脚配置错、需要看应用内部变量、
 需要量化某个循环的真实速率或丢帧率。
 
-> 本文件在 `infantry_head/docs/` 下，但下板相关章节同样适用于 `infantry_body`。
+> 本文件在 `Dust_Infantry_Head/docs/` 下，但下板相关章节同样适用于 `Dust_Infantry_Body`。
 > 相关工具：`tools/rtt.sh`、`tools/rtt_hpm.py`（上板 RTT）、
 > `boards/*/*/openocd*.cfg`（OpenOCD 配置）。
 
@@ -54,13 +54,13 @@ telnet localhost 4445
 > resume
 
 # ③ 看上板日志（RTT）
-cd ~/zephyrproject/projects/infantry_head
+cd ~/zephyrproject/projects/Dust_Infantry_Head
 python3 tools/rtt_hpm.py -e build/zephyr/zephyr.elf --port 4445
 ```
 
 ```bash
 # 下板：起 OpenOCD（SWD），并同时起 RTT 服务
-BODY=~/zephyrproject/projects/infantry_body
+BODY=~/zephyrproject/projects/Dust_Infantry_Body
 /usr/bin/openocd -s /usr/share/openocd/scripts \
   -f "$BODY/boards/st/board_dm_mc02/openocd.cfg" \
   -c "STM32H723VG.cpu0 configure -event gdb-attach {halt}" \
@@ -167,7 +167,7 @@ $HOME/openocd-hpm/bin/openocd \
 ### 4.1 启动命令（同时开 RTT 服务）
 
 ```bash
-BODY=~/zephyrproject/projects/infantry_body
+BODY=~/zephyrproject/projects/Dust_Infantry_Body
 /usr/bin/openocd -s /usr/share/openocd/scripts \
   -f "$BODY/boards/st/board_dm_mc02/openocd.cfg" \
   -c "STM32H723VG.cpu0 configure -event gdb-attach {halt}" \
@@ -353,7 +353,7 @@ clocks = <&rcc STM32_CLOCK(APB1_2, 8)>,
 ### 7.1 找符号地址
 
 ```bash
-cd ~/zephyrproject/projects/infantry_head      # 或 infantry_body
+cd ~/zephyrproject/projects/Dust_Infantry_Head      # 或 Dust_Infantry_Body
 readelf -sW build/zephyr/zephyr.elf | grep -E "inter_rx|mcu_inter|from_body|slots"
 ```
 
@@ -432,7 +432,7 @@ OpenOCD 的 `rtt setup/start/server` 只对 ARM 目标注册，RISC-V 上没有�
 只有 SBA 不可用时才回退到 `halt → 读 → 写回 RdOff → resume`：
 
 ```bash
-cd ~/zephyrproject/projects/infantry_head
+cd ~/zephyrproject/projects/Dust_Infantry_Head
 python3 tools/rtt_hpm.py -e build/zephyr/zephyr.elf --port 4445            # 持续看
 python3 tools/rtt_hpm.py -e build/zephyr/zephyr.elf --port 4445 --once     # 只看控制块
 python3 tools/rtt_hpm.py ... --log /tmp/rtt.log                            # 同时存盘
@@ -606,7 +606,7 @@ if (remain > 0) k_msleep(remain);      // k_msleep(1) 实际睡 2~3 个 tick
 
 ```python
 import sys, time, struct
-sys.path.insert(0, '/home/rookie/zephyrproject/projects/infantry_head/tools')
+sys.path.insert(0, '/home/rookie/zephyrproject/projects/Dust_Infantry_Head/tools')
 from rtt_hpm import OcdTelnet          # 极简 openocd telnet 客户端
 
 o = OcdTelnet('127.0.0.1', 4445)       # 上板 telnet 口；下板是 4444
