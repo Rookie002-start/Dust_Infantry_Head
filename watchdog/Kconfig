@@ -25,22 +25,14 @@ config WDT_SUPERVISOR_HEALTH_WARMUP_MS
 	default 1000
 	range 200 10000
 
-endmenu
-
-menu "HPM EWDG driver"
-
-config WDT_HPMICRO
-	bool "HPM53 EWDG hardware driver"
+config WDT_SUPERVISOR_PRE_RESET_CALLBACK
+	bool "Enable watchdog pre-reset callback"
+	depends on WDT_SUPERVISOR
 	default n
-	depends on DT_HAS_HPMICRO_HPM_EWDG_ENABLED
-	select WATCHDOG
-	help
-	  Enable the HPM EWDG driver through the Zephyr watchdog API.
 
-config WDT_HPMICRO_WARNING_MS
-	int "EWDG pre-reset warning lead (ms)"
-	depends on WDT_HPMICRO
-	default 100
-	range 50 1000
+config WDT_SUPERVISOR_PAUSE_IN_SLEEP
+	bool "Pause watchdog in sleep"
+	depends on WDT_SUPERVISOR
+	default n
 
 endmenu

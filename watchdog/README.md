@@ -12,7 +12,8 @@ SoC watchdog 驱动
 
 - `supervisor.*`：预热、心跳检查、故障锁存、喂狗。
 - `health.*`：业务心跳计数，不依赖 SoC。
-- `adapters/<soc>/`：寄存器、时钟、中断和复位原因等硬件细节。
+- SoC 适配层位于公共框架对应目录，例如 HPM EWDG 在
+  `Zephyr_HPMicro/sdk_glue/drivers/watchdog/`。
 - 业务代码只看 `CONFIG_WDT_SUPERVISOR`，不引用具体芯片驱动。
 
 移植新 SoC：

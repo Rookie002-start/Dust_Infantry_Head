@@ -15,11 +15,13 @@ const struct device *const kWatchdog =
 int channel = -1;
 atomic_t fault_mask = ATOMIC_INIT(0);
 
+#if CONFIG_WDT_SUPERVISOR_PRE_RESET_CALLBACK
 void PreReset(const struct device *, int)
 {
     LOG_ERR("watchdog pre-reset fault=0x%08x",
             static_cast<uint32_t>(atomic_get(&fault_mask)));
 }
+#endif
 
 } // namespace
 
@@ -39,7 +41,11 @@ bool Init()
             .min = 0,
             .max = CONFIG_WDT_SUPERVISOR_TIMEOUT_MS,
         },
+#if CONFIG_WDT_SUPERVISOR_PRE_RESET_CALLBACK
         .callback = PreReset,
+#else
+        .callback = nullptr,
+#endif
         .flags = WDT_FLAG_RESET_SOC,
     };
 
@@ -48,8 +54,11 @@ bool Init()
         LOG_ERR("watchdog install timeout failed: %d", channel);
         return false;
     }
-    if (wdt_setup(kWatchdog, WDT_OPT_PAUSE_IN_SLEEP |
-                                WDT_OPT_PAUSE_HALTED_BY_DBG) != 0) {
+    uint8_t options = WDT_OPT_PAUSE_HALTED_BY_DBG;
+#if CONFIG_WDT_SUPERVISOR_PAUSE_IN_SLEEP
+    options |= WDT_OPT_PAUSE_IN_SLEEP;
+#endif
+    if (wdt_setup(kWatchdog, options) != 0) {
         LOG_ERR("watchdog setup failed");
         return false;
     }

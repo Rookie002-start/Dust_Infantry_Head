@@ -12,7 +12,6 @@ set(CONFIG_SYM PRJ_MAIN)
 list(APPEND BOARD_ROOT "${ZEPHYR_USER_DIR}")
 list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}")
 list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}/dts")
-list(APPEND DTS_ROOT   "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---- (3) ZEPHYR_EXTRA_MODULES（通用：framework + platform/cmsis）------------
 set(ZEPHYR_EXTRA_MODULES
@@ -63,14 +62,6 @@ if(CONFIG_WDT_SUPERVISOR)
   target_sources(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/supervisor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/health.cpp
-  )
-endif()
-
-# ---- (6.0.1) HPM53 EWDG adapter --------------------------------------------
-if(CONFIG_WDT_HPMICRO)
-  target_sources(app PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/adapters/hpmicro/wdt_hpmicro.c
-    ${HPM_SDK_DIR}/drivers/src/hpm_ewdg_drv.c
   )
 endif()
 
