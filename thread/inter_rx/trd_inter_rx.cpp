@@ -23,6 +23,9 @@
 #include "from_body.hpp"
 #include "inter_cmd.hpp"
 #include "Irq_handlers.h"
+#if defined(CONFIG_LATENCY_TRACE)
+#include "latency_trace.hpp"
+#endif
 #if defined(CONFIG_WDT_SUPERVISOR)
 #include "health.hpp"
 #endif
@@ -42,7 +45,7 @@ namespace thread::inter_rx
     static Thread<2048> thread_{};
 
     static constexpr inter_cmd::Dir kDir         = inter_cmd::Dir::Down;  // 本线程接收方向
-    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 12
+    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 16 / 28（诊断）
     static constexpr uint32_t       kRxTimeoutMs = 30;   // 发送周期 1ms → 连续丢 30 轮才判离线
     static constexpr uint32_t       kPollMs      = 1;    // 与对端发送周期一致
 
@@ -78,6 +81,14 @@ namespace thread::inter_rx
         msg.online = online;
         msg.age_ms = age_ms;
         (void)zbus_chan_pub(&pub_from_body, &msg, K_NO_WAIT);
+
+#if defined(CONFIG_LATENCY_TRACE)
+        inter_cmd::TraceState trace{};
+        if (inter_cmd::GetFrag(raw, inter_cmd::Dir::Down,
+                               inter_cmd::FrameType::StateTrace, trace)) {
+            diagnostics::latency::OnLowerTrace(trace);
+        }
+#endif
     }
 
     /// 启动自检：本方向必须正好注册 1 个整帧入口

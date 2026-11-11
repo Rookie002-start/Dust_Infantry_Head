@@ -23,6 +23,12 @@ namespace topic::pc_to
         float pitch_ang;        // pitch轴角度
         float pitch_vel;        // pitch轴角速度
         float pitch_acc;        // pitch轴角加速度
+
+#if defined(CONFIG_LATENCY_TRACE)
+        uint32_t trace_rx_cycles = 0;  // 完整有效 PC 帧被确认的上板周期时刻
+        uint8_t  trace_seq = 0;        // 测试序号（version 低 8 位）
+        bool     trace_valid = false;  // 只有真实 PC 帧为 true，Idle 发布不采样
+#endif
     };
 }
 

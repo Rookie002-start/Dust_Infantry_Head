@@ -304,7 +304,7 @@ R1: TS[15:0] DLC[19:16] BRS[20] FDF[21] FIDX[28:24] ANMF[31]
 | 实例 | 基地址 | 用途 |
 |---|---|---|
 | fdcan1 | `0x4000A000` | `user-can1`（底盘电机总线） |
-| fdcan2 | `0x4000A400` | `user-can2` / **`inter-can`（上下板通信，ID 0x200，12B FD 帧）** |
+| fdcan2 | `0x4000A400` | `user-can2` / **`inter-can`（上下板通信，ID 0x200，16B FD 帧）** |
 | fdcan3 | `0x4000D400` | `user-can3`（云台电机，DM） |
 
 message RAM：`0x4000AC00`（`reg-names = "message_ram"`），FIFO 起始地址是**相对它的偏移**

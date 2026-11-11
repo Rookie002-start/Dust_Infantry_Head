@@ -33,6 +33,22 @@ config PRJ_MAIN
 
 if PRJ_MAIN
 
+config LATENCY_TRACE
+    bool "Auto-aim receive to gimbal motor TX latency trace"
+    default n
+    depends on TRD_PC && TRD_MCU_INTER && TRD_INTER_RX
+    select INTER_CMD
+    help
+      临时诊断功能：PC 自瞄有效帧 -> 上板 CAN 帧提交 TX FIFO -> 下板 CAN RX
+      中断 -> 云台电机控制帧提交，按约 500 Hz PC 数据流分段计时并经现有 CAN
+      链路回传上板汇总。
+
+      上下板必须使用相同的 inter_cmd.hpp 和 CONFIG_LATENCY_TRACE=y。
+      正常固件默认关闭。测量期间不要在 500 Hz 事件路径内打印日志。
+
+      只测量软件事件边界；上板提交 TX FIFO 到下板 RX 中断之间的总线传输和
+      中断进入时间不包含在 total_us 中，无拥堵时通常约为 0.1~0.3 ms。
+
 # =================               TRD_CONFIG                ====================
 
 config TRD_GPIO
@@ -114,6 +130,7 @@ config TRD_PC
     bool "PC (auto-aim) link thread"
     default n
     select DUST_COM_USB
+    select DUST_TPC_FROM_BODY
     select DUST_TPC_IMU_TO
     select DUST_TPC_PC_TO
     help

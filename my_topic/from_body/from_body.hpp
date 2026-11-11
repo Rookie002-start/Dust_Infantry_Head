@@ -24,7 +24,7 @@ namespace topic::from_body
     /// 状态帧契约（zbus 通道：消费者用 zbus_chan_read 轮询最新值）
     struct Message
     {
-        inter_cmd::GimbalState  gimbal{};    // 实测云台角（rad）
+        inter_cmd::GimbalState  gimbal{};    // 云台反馈角（rad）+ pitch 编码器角速度（rad/s）
         inter_cmd::ShooterState shooter{};   // 子弹速度
 
         /// 超时判定结果。false = 下板数据已失效（上电初值为 false）

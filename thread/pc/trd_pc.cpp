@@ -21,9 +21,7 @@
 #include "health.hpp"
 #endif
 
-#if defined(CONFIG_DUST_TPC_FROM_BODY)
-#include "from_body.hpp"        // bullet_speed 来源（下板实测弹速）
-#endif
+#include "from_body.hpp"        // 下板实测弹速 + pitch 编码器角速度
 #if defined(CONFIG_TRD_BOOSTER)
 #include "trd_booster.hpp"      // bullet_count 来源（累计进弹次数）
 #endif
@@ -76,10 +74,13 @@ static uint32_t g_imu_ver      = 0;
 static uint32_t g_last_sent_ver = 0;
 static uint32_t g_last_send_ms  = 0;
 
+/// 下板状态快照（pitch 编码器角速度 + 弹速）
+static topic::from_body::Message g_body {};
+
 // ==================== 接收：组帧 + 校验 + 发布 ====================
 
 /// 发布一帧自瞄结果（本线程是 pub_pc_to 的唯一生产者）
-static void PublishAim(const PCRecvAutoAimData &d)
+static void PublishAim(const PCRecvAutoAimData &d, uint32_t rx_cycles)
 {
     topic::pc_to::Message msg {};
     msg.version   = ++g_pub_ver;
@@ -90,6 +91,13 @@ static void PublishAim(const PCRecvAutoAimData &d)
     msg.pitch_ang = d.pitch.pitch_ang;
     msg.pitch_vel = d.pitch.pitch_vel;
     msg.pitch_acc = d.pitch.pitch_acc;
+#if defined(CONFIG_LATENCY_TRACE)
+    msg.trace_rx_cycles = rx_cycles;
+    msg.trace_seq       = static_cast<uint8_t>(msg.version);
+    msg.trace_valid     = true;
+#else
+    (void)rx_cycles;
+#endif
     (void)zbus_chan_pub(&pub_pc_to, &msg, K_NO_WAIT);
 }
 
@@ -131,8 +139,11 @@ static void DecodeRecv(const uint8_t *frame)
         return;
     }
 
+    // 延迟测点定义在完整校验通过之后：这里的数据才允许进入控制链。
+    const uint32_t rx_cycles = k_cycle_get_32();
+
     // mode：0 空闲 / 1 自瞄不开火 / 2 自瞄开火（原样透传，语义由消费者解释）
-    PublishAim(d);
+    PublishAim(d, rx_cycles);
     ++g_rx_frames;
 
     g_last_valid_ms = k_uptime_get_32();
@@ -208,16 +219,20 @@ static void PollImu()
     g_imu     = latest;
 }
 
+/// 轮询下板状态通道；读不到时沿用上一帧，是否可信由 Message::online 决定
+static void PollBody()
+{
+    topic::from_body::Message latest {};
+    if (zbus_chan_read(&pub_from_body, &latest, K_NO_WAIT) == 0) {
+        g_body = latest;
+    }
+}
+
 /// 子弹速度：下板实测（未接入时恒 0）
 static float BulletSpeed()
 {
 #if defined(CONFIG_DUST_TPC_FROM_BODY)
-    static topic::from_body::Message body {};
-    topic::from_body::Message latest {};
-    if (zbus_chan_read(&pub_from_body, &latest, K_NO_WAIT) == 0) {
-        body = latest;
-    }
-    return body.online ? body.shooter.bullet_speed : 0.0f;
+    return g_body.online ? g_body.shooter.bullet_speed : 0.0f;
 #else
     return 0.0f;
 #endif
@@ -257,7 +272,8 @@ static bool SendToPc()
     PC_Send_Data.yaw.yaw_ang     = g_imu.yaw_total;   // 累计偏航（可跨圈）：世界系连续角，自瞄解算用
     PC_Send_Data.yaw.yaw_vel     = g_imu.gyro[2];     // z 轴角速度 → 偏航角速度
     PC_Send_Data.pitch.pitch_ang = g_imu.pitch;
-    PC_Send_Data.pitch.pitch_vel = g_imu.gyro[1];     // y 轴角速度 → 俯仰角速度
+    PC_Send_Data.pitch.pitch_vel =
+        g_body.online ? g_body.gimbal.pitch_omega : 0.0f;  // 下板 pitch 编码器角速度
     PC_Send_Data.bullet.bullet_speed = BulletSpeed();
     PC_Send_Data.bullet.bullet_count = BulletCount();
     PC_Send_Data.crc16 = pc_proto::get_crc16_check_sum(
@@ -306,6 +322,7 @@ static void Task(void*, void*, void*)
 
         // ③ 发：IMU 新样本优先，否则按兜底周期（心跳）
         PollImu();
+        PollBody();
         const uint32_t now = k_uptime_get_32();
         if (TxDue(now) && SendToPc()) {
             g_last_sent_ver = g_imu_ver;

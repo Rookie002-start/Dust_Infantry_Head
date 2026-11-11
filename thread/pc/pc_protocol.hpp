@@ -18,9 +18,10 @@
 #pragma pack(push, 1)
 
 /**
- * @brief 上板 → PC：自瞄解算需要的本体状态（**全部来自 IMU**）
+ * @brief 上板 → PC：自瞄解算需要的本体状态
  *
- *   q / yaw / pitch ← pub_imu_to（框架 IMU 模块）
+ *   q / yaw / pitch_ang / yaw_vel ← pub_imu_to（框架 IMU 模块）
+ *   pitch_vel                     ← pub_from_body（下板 pitch 编码器角速度）
  *   bullet_speed    ← 下板实测弹速（pub_from_body，未接入时恒 0）
  *   bullet_count    ← 上板累计发弹数（发射机构线程计数，无该线程时恒 0）
  *   mode            ← 上板回显自瞄状态：0-空闲（没在用 PC 数据） 1-自瞄

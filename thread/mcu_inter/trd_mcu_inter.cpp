@@ -20,6 +20,9 @@
 #include "pc_to.hpp"          // pull 来源：PC 自瞄通道
 #include "can.hpp"
 #include "Irq_handlers.h"
+#if defined(CONFIG_LATENCY_TRACE)
+#include "latency_trace.hpp"
+#endif
 #if defined(CONFIG_WDT_SUPERVISOR)
 #include "health.hpp"
 #endif
@@ -107,7 +110,13 @@ namespace thread::mcu_inter
         tx.flags = CAN_FRAME_FDF | CAN_FRAME_BRS;   // FD 帧 + 数据段 2Mbps
         tx.dlc   = can_bytes_to_dlc(len);
         memcpy(tx.data, buf, len);
+#if defined(CONFIG_LATENCY_TRACE)
+        diagnostics::latency::BeforeCanSend();
+#endif
         if (!inter_bus::Bus().Send(&tx, K_MSEC(kTxTimeoutMs))) {
+#if defined(CONFIG_LATENCY_TRACE)
+            diagnostics::latency::OnCanSendFailed();
+#endif
             // 等不到空 TX 缓冲区（总线被占满 / 控制器没起来）：限流记录，别刷屏
             static int64_t last_warn_ms = 0;
             const int64_t now = k_uptime_get();
@@ -115,6 +124,10 @@ namespace thread::mcu_inter
                 last_warn_ms = now;
                 LOG_WRN("can tx busy (TX 缓冲区一直满)");
             }
+        } else {
+#if defined(CONFIG_LATENCY_TRACE)
+            diagnostics::latency::OnCanSubmitted();
+#endif
         }
     }
 
@@ -142,7 +155,7 @@ namespace thread::mcu_inter
     /// imu.yaw_total / imu.pitch 同参考系，所以正常是 +1）。
     /// 若 PC 的偏差正方向与下发的角度相反，把对应项取 -1。
     static constexpr float kAimYawErrSign   = +1.0f;
-    static constexpr float kAimPitchErrSign = -1.0f;
+    static constexpr float kAimPitchErrSign = +1.0f;
 
     /// 自瞄 pitch 绝对目标软限位：必须与下板 trd_gimbal.cpp 的 kPitchMin / kPitchMax 一致。
     /// 在这里先夹住，避免目标顶出界后下板软限位一直压着、要等目标自己绕回来才动。
@@ -253,6 +266,11 @@ namespace thread::mcu_inter
             if (new_pc) {
                 pc_ver    = pc.version;
                 pc_ver_ms = now;
+#if defined(CONFIG_LATENCY_TRACE)
+                if (pc.trace_valid) {
+                    diagnostics::latency::OnPcFrame(pc.trace_rx_cycles, pc.version);
+                }
+#endif
             }
 
             // 失效 / 空闲 → 角度全 0（下板按 flags 忽略，不留上一帧的自瞄量）
@@ -300,9 +318,13 @@ namespace thread::mcu_inter
         // 每周期都刷新标志位并写分片：遥控没连上时 CommState 就是"全 0 + 无 LinkOk"的失效指令
         // （下板据此停车），IMU 位则如实反映 IMU 新鲜度，不受遥控在不在线影响。
 
+        uint8_t trace_bits = 0u;
+#if defined(CONFIG_LATENCY_TRACE)
+        trace_bits = diagnostics::latency::MarkerBits();
+#endif
         comm_state.flags = static_cast<uint8_t>((link_ok ? inter_cmd::kCommFlagLinkOk : 0u) |
                                                 (imu_ok  ? inter_cmd::kCommFlagImuOk  : 0u) |
-                                                vision_bits);
+                                                vision_bits | trace_bits);
         UpdateSlot(inter_cmd::FrameType::StateComm,
                    reinterpret_cast<const uint8_t *>(&comm_state), sizeof(comm_state));
     }
