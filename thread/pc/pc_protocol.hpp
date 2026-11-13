@@ -20,9 +20,7 @@
 /**
  * @brief 上板 → PC：自瞄解算需要的本体状态
  *
- *   q / yaw / pitch_ang / yaw_vel ← pub_imu_to（框架 IMU 模块）
- *   pitch_vel                     ← pub_from_body（下板 pitch 编码器角速度）
- *   bullet_speed    ← 下板实测弹速（pub_from_body，未接入时恒 0）
+ *   q / yaw / pitch / 角速度 ← pub_imu_to（框架 IMU 模块）
  *   bullet_count    ← 上板累计发弹数（发射机构线程计数，无该线程时恒 0）
  *   mode            ← 上板回显自瞄状态：0-空闲（没在用 PC 数据） 1-自瞄
  */
@@ -50,7 +48,6 @@ struct PCSendAutoAimData
 
     struct
     {
-        float bullet_speed;         // 子弹速度
         uint16_t bullet_count;      // 子弹累计发送次数
     } bullet;
 
@@ -88,7 +85,7 @@ struct PCRecvAutoAimData
 
 #pragma pack(pop)
 
-static_assert(sizeof(PCSendAutoAimData) == 43, "PCSendAutoAimData layout changed (PC 侧需同步)");
+static_assert(sizeof(PCSendAutoAimData) == 39, "PCSendAutoAimData layout changed (PC 侧需同步)");
 static_assert(sizeof(PCRecvAutoAimData) == 29, "PCRecvAutoAimData layout changed (PC 侧需同步)");
 
 namespace pc_proto
@@ -97,7 +94,7 @@ namespace pc_proto
     constexpr uint8_t kHead0 = 'S';
     constexpr uint8_t kHead1 = 'P';
 
-    constexpr uint16_t kSendFrameLen = sizeof(PCSendAutoAimData);   // 43
+    constexpr uint16_t kSendFrameLen = sizeof(PCSendAutoAimData);   // 39
     constexpr uint16_t kRecvFrameLen = sizeof(PCRecvAutoAimData);   // 29
 
     // ---- 接收侧 mode 取值 ----

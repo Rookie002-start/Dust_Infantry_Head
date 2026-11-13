@@ -21,7 +21,6 @@
 #include "health.hpp"
 #endif
 
-#include "from_body.hpp"        // 下板实测弹速 + pitch 编码器角速度
 #if defined(CONFIG_TRD_BOOSTER)
 #include "trd_booster.hpp"      // bullet_count 来源（累计进弹次数）
 #endif
@@ -60,9 +59,7 @@ static_assert(pc_proto::kRecvFrameLen <= kRxChunk, "recv frame larger than one r
 static uint8_t  g_rx_buf[64] {};
 static uint16_t g_rx_len = 0;
 
-static uint32_t g_rx_frames = 0;        ///< 通过校验并发布出去的自瞄帧
 static uint32_t g_rx_bad    = 0;        ///< CRC/范围检查失败的帧
-static uint32_t g_tx_fail   = 0;        ///< 发给 PC 的帧被丢弃次数
 static uint32_t g_last_valid_ms = 0;    ///< 最后一次收到有效自瞄帧的时刻
 static uint8_t  g_last_mode = pc_proto::kRecvModeIdle;   ///< 最后一帧有效自瞄数据里的 mode
 static bool     g_link_ok = false;
@@ -73,9 +70,6 @@ static topic::imu_to::Message g_imu {};
 static uint32_t g_imu_ver      = 0;
 static uint32_t g_last_sent_ver = 0;
 static uint32_t g_last_send_ms  = 0;
-
-/// 下板状态快照（pitch 编码器角速度 + 弹速）
-static topic::from_body::Message g_body {};
 
 // ==================== 接收：组帧 + 校验 + 发布 ====================
 
@@ -144,7 +138,6 @@ static void DecodeRecv(const uint8_t *frame)
 
     // mode：0 空闲 / 1 自瞄不开火 / 2 自瞄开火（原样透传，语义由消费者解释）
     PublishAim(d, rx_cycles);
-    ++g_rx_frames;
 
     g_last_valid_ms = k_uptime_get_32();
     g_last_mode     = d.mode;
@@ -219,25 +212,6 @@ static void PollImu()
     g_imu     = latest;
 }
 
-/// 轮询下板状态通道；读不到时沿用上一帧，是否可信由 Message::online 决定
-static void PollBody()
-{
-    topic::from_body::Message latest {};
-    if (zbus_chan_read(&pub_from_body, &latest, K_NO_WAIT) == 0) {
-        g_body = latest;
-    }
-}
-
-/// 子弹速度：下板实测（未接入时恒 0）
-static float BulletSpeed()
-{
-#if defined(CONFIG_DUST_TPC_FROM_BODY)
-    return g_body.online ? g_body.shooter.bullet_speed : 0.0f;
-#else
-    return 0.0f;
-#endif
-}
-
 /// 累计发弹数：发射机构线程按"进弹脉冲"计数（未接弹丸检测，是近似值）
 static uint16_t BulletCount()
 {
@@ -272,9 +246,7 @@ static bool SendToPc()
     PC_Send_Data.yaw.yaw_ang     = g_imu.yaw_total;   // 累计偏航（可跨圈）：世界系连续角，自瞄解算用
     PC_Send_Data.yaw.yaw_vel     = g_imu.gyro[2];     // z 轴角速度 → 偏航角速度
     PC_Send_Data.pitch.pitch_ang = g_imu.pitch;
-    PC_Send_Data.pitch.pitch_vel =
-        g_body.online ? g_body.gimbal.pitch_omega : 0.0f;  // 下板 pitch 编码器角速度
-    PC_Send_Data.bullet.bullet_speed = BulletSpeed();
+    PC_Send_Data.pitch.pitch_vel = g_imu.gyro[1];     // y 轴角速度 → 俯仰角速度
     PC_Send_Data.bullet.bullet_count = BulletCount();
     PC_Send_Data.crc16 = pc_proto::get_crc16_check_sum(
         reinterpret_cast<uint8_t *>(&PC_Send_Data),
@@ -284,10 +256,6 @@ static bool SendToPc()
     // printk("pitch:%f\r\n", PC_Send_Data.pitch.pitch_ang);
     // printk("roll:%f\r\n", g_imu.roll);
     if (!usb_.Send(reinterpret_cast<const uint8_t *>(&PC_Send_Data), sizeof(PC_Send_Data))) {
-        if ((++g_tx_fail % kDropLogPeriod) == 1u) {
-            // LOG_WRN("usb tx drop (not configured / ep busy), total %u",
-            //         static_cast<unsigned>(g_tx_fail));
-        }
         return false;
     }
     return true;
@@ -322,7 +290,6 @@ static void Task(void*, void*, void*)
 
         // ③ 发：IMU 新样本优先，否则按兜底周期（心跳）
         PollImu();
-        PollBody();
         const uint32_t now = k_uptime_get_32();
         if (TxDue(now) && SendToPc()) {
             g_last_sent_ver = g_imu_ver;

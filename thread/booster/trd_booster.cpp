@@ -157,9 +157,6 @@ static constexpr uint32_t kFrictionKeyGapMs = 50;
 /// 拨弹盘目标角速度（输出轴 rad/s）
 static constexpr float kFeederOmega = 5.0f;
 
-// 单发节拍：每 kShotIntervalMs 启动一发，单发持续进弹 kFeedPulseMs
-static constexpr uint32_t kShotIntervalMs = 100;   // 射频上限 = 1000 / kShotIntervalMs
-static constexpr uint32_t kFeedPulseMs    = 70;    // 每发拨弹角 ≈ kFeederOmega × kFeedPulseMs
 static constexpr uint32_t kFeederRxTimeoutMs = 20; //拨弹盘电机反馈最大超时时间
 
 // ==================== 电流限幅（保护机构与电调）====================
@@ -180,7 +177,6 @@ static constexpr uint32_t kAimTimeoutMs  = 100;
 // ==================== 诊断 ====================
 static constexpr uint8_t  kTxPerTickMax  = 4;         // 每拍最多外发帧数
 static constexpr uint32_t kDropLogPeriod = 1000;      // 丢帧/发送失败累计到该值上报一次
-static constexpr uint32_t kTuneLogPeriod = 200;       // 整定日志周期（ms，LOG_DBG 级）
 
 // ==================== 本线程私有状态（只有 Task 读写，无需加锁）====================
 
@@ -390,12 +386,12 @@ static void ReadCommand()
 }
 
 /**
- * @brief 目标量生成：摩擦轮升速 + 拨弹盘进弹节拍（含卡弹反转）
+ * @brief 目标量生成：摩擦轮升速 + 拨弹盘进弹/退弹
  *
  * 摩擦轮：friction_ctrl 按下沿切换软开关，状态机 Idle/Spinup/Ready/Fault；
  *         失能 / 掉线一律回 Idle（恢复需重新手动开），非激活态目标 0（速度环主动刹停）
- * 拨弹盘：只有 开火 && 未失能 && 链路有效 && 摩擦轮到速 且 距上一发 ≥ kShotIntervalMs
- *         才启动一发，单发持续 kFeedPulseMs；禁止进弹时目标立即归零。
+ * 拨弹盘：只有 开火/退弹 && 未失能 && 链路有效 && 摩擦轮到速 才持续转动；
+ *         禁止进弹时目标立即归零。
  *
  * @param feeder_snap   本拍拨弹盘快照（卡弹判定用，与速度环同一帧）
  * @param friction_snap 本拍摩擦轮快照（与速度环用同一帧，避免跨帧读数）
@@ -594,57 +590,6 @@ static void FlushTx()
  * 周期用 tick 计时：1ms = 2 个 tick（CONFIG_SYS_CLOCK_TICKS_PER_SEC=2000），
  * 用 k_uptime_get() 的 ms 粒度算余量会把周期抖成 1~2ms。
  */
-/**
- * @brief 整定用日志（LOG_DBG 级，默认被 LOG_LEVEL_INF 挡掉）
- *
- * 整定时把本文件开头的 LOG_MODULE_REGISTER 级别改成 LOG_LEVEL_DBG 即可在 RTT 上看到
- * 目标 / 实测 / 电流；Zephyr log 默认不支持 %f，所以这里的量都放大成整数打印。
- */
-static void LogTuning(const motor::dji::DjiC610::Snapshot &feeder_snap,
-                      const motor::dji::DjiC620::Snapshot *friction_snap)
-{
-    static uint32_t last_ms = 0;
-
-    const uint32_t now = k_uptime_get_32();
-    if ((now - last_ms) < kTuneLogPeriod) {
-        return;
-    }
-    last_ms = now;
-
-    // LOG_DBG("feeder w_ref=%d w=%d i=%d | fri w_ref=%d w=%d/%d i=%d/%d | stop=%d link=%d",
-    //         static_cast<int>(g_feeder_target * 100.0f),
-    //         static_cast<int>(feeder_snap.omega * 100.0f),
-    //         static_cast<int>(g_feeder_current * 100.0f),
-    //         static_cast<int>(g_friction_target * 100.0f),
-    //         static_cast<int>(friction_snap[0].omega * 100.0f),
-    //         static_cast<int>(friction_snap[1].omega * 100.0f),
-    //         static_cast<int>(g_friction_current[0] * 100.0f),
-    //         static_cast<int>(g_friction_current[1] * 100.0f),
-    //         g_cmd.stop ? 1 : 0,
-    //         g_cmd.online ? 1 : 0);
-
-    // 弹丸检测诊断：
-    //   shots  = 计入的发数
-    //   edges  = 原始上升沿数
-    //   merged = 被并窗并掉的密簇个数（同一发的余振簇）
-    //   period = 实测射速间隔（滑动平均）；merge = 当前生效的并窗
-    //   edge   = 原始沿间隔直方图（<1 / 1~5 / 5~20 / 20~50 / 50~100 / ≥100 ms）
-    //   cluster= 簇内沿数直方图（1 / 2 / 3~5 / 6~9 / ≥10 根）：
-    //            后三档之和 ≈ 发数 + merged，前两档之和 ≈ 被丢掉的干扰簇数
-    // LOG_DBG("shots=%d edges=%d merged=%d | period=%d ms merge=%d ms",
-    //         static_cast<int>(atomic_get(&shot_count)),
-    //         static_cast<int>(atomic_get(&g_shoot_irq_edges)),
-    //         static_cast<int>(atomic_get(&g_shoot_irq_merged)),
-    //         static_cast<int>(g_shoot_irq_period_ms),
-    //         static_cast<int>(g_shoot_irq_merge_ms));
-    // LOG_DBG("edge    %u %u %u %u %u %u",
-    //         g_edge_hist[0], g_edge_hist[1], g_edge_hist[2],
-    //         g_edge_hist[3], g_edge_hist[4], g_edge_hist[5]);
-    // LOG_DBG("cluster %u %u %u %u %u",
-    //         g_cluster_hist[0], g_cluster_hist[1], g_cluster_hist[2],
-    //         g_cluster_hist[3], g_cluster_hist[4]);
-}
-
 static void Task(void*, void*, void*)
 {
     for (;;)
@@ -666,7 +611,6 @@ static void Task(void*, void*, void*)
         ControlCalculate(feeder_snap, friction_snap);
         FramePublish();
         FlushTx();
-        LogTuning(feeder_snap, friction_snap);
 
         const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
         const int64_t used   = k_uptime_ticks() - tick_start;

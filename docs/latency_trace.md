@@ -21,7 +21,7 @@
 - 上板在 `Can::Send()` 成功把 CAN 帧提交给驱动后计算 `upper_us`。
 - 下板在 CAN RX 回调中记录本地周期；云台线程看到序号变化后，在
   `can3.Send()` 前分别记录 yaw / pitch 的 `lower_us`。
-- 下板把 `TraceState` 加入原有 CAN 0x200 下行帧（16 B 扩展为 28 B），
+- 下板把 `TraceState` 加入原有 CAN 0x200 下行帧（8 B 扩展为 20 B），
   上板按序号配对并计算 `upper_us + lower_us`。
 - 上板每 2 秒输出两行 `LT total` 日志，分别是 yaw 和 pitch。
 
@@ -117,7 +117,7 @@ LT total seq=... pitch n=... avg(u/l/t)=... p50=... p95=... p99=... max=... over
 省略 `EXTRA_CONF_FILE=latency_trace.conf` 重新构建即可。默认配置下：
 
 - 上行 CAN 0x100 仍为 63 B。
-- 下行 CAN 0x200 保持 16 B。
+- 下行 CAN 0x200 保持 8 B。
 - 不编译上板统计模块，不传序号，不记录 RX 周期。
 
 测量完成后必须把两板都恢复为默认构建。

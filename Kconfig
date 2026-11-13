@@ -51,12 +51,6 @@ config LATENCY_TRACE
 
 # =================               TRD_CONFIG                ====================
 
-config TRD_GPIO
-    bool "GPIO thread task"
-    default n
-    help
-      Enable the GPIO idle thread.
-
 config TRD_CAN
     bool "CAN thread task"
     default n
@@ -130,7 +124,6 @@ config TRD_PC
     bool "PC (auto-aim) link thread"
     default n
     select DUST_COM_USB
-    select DUST_TPC_FROM_BODY
     select DUST_TPC_IMU_TO
     select DUST_TPC_PC_TO
     help

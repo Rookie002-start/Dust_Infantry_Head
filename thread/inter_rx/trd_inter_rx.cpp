@@ -45,7 +45,7 @@ namespace thread::inter_rx
     static Thread<2048> thread_{};
 
     static constexpr inter_cmd::Dir kDir         = inter_cmd::Dir::Down;  // 本线程接收方向
-    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 16 / 28（诊断）
+    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 8 / 20（诊断）
     static constexpr uint32_t       kRxTimeoutMs = 30;   // 发送周期 1ms → 连续丢 30 轮才判离线
     static constexpr uint32_t       kPollMs      = 1;    // 与对端发送周期一致
 
@@ -76,8 +76,6 @@ namespace thread::inter_rx
         topic::from_body::Message msg{};
         (void)inter_cmd::GetFrag(raw, inter_cmd::Dir::Down,
                                  inter_cmd::FrameType::StateGimbal,  msg.gimbal);
-        (void)inter_cmd::GetFrag(raw, inter_cmd::Dir::Down,
-                                 inter_cmd::FrameType::StateShooter, msg.shooter);
         msg.online = online;
         msg.age_ms = age_ms;
         (void)zbus_chan_pub(&pub_from_body, &msg, K_NO_WAIT);

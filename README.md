@@ -130,7 +130,7 @@ west flash -d build
 ```
 
 上板和下板必须使用同一版 `inter_cmd/inter_cmd.hpp`，并且都打开
-`CONFIG_LATENCY_TRACE=y`。不能只烧上板：正常下板的 0x200 帧为 16 B，诊断下板
+`CONFIG_LATENCY_TRACE=y`。不能只烧上板：正常下板的 0x200 帧为 8 B，诊断下板
 的下行帧为 28 B，并在末尾携带 `TraceState`。
 
 如果之前用 `-DEXTRA_CONF_FILE=latency_trace.conf` 构建过，现在已把开关移到

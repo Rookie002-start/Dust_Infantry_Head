@@ -8,14 +8,6 @@ if(CONFIG_WDT_SUPERVISOR)
 	)
 endif()
 
-if(CONFIG_TRD_GPIO)
-	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpio/trd_gpio.cpp)
-	target_include_directories(app PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}
-		${CMAKE_CURRENT_SOURCE_DIR}/gpio
-	)
-endif()
-
 if(CONFIG_TRD_CAN)
 	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/can/trd_can_tx.cpp)
 	target_include_directories(app PRIVATE
