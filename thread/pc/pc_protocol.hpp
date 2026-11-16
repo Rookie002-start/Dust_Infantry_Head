@@ -30,9 +30,7 @@ struct PCSendAutoAimData
 
     uint8_t mode = 0;               // 0-空闲 1-自瞄
 
-    float q[4];                     // 四元数姿态[w,x,y,z]：由 yaw/pitch/roll 手算，ZXY 轴序
-                                    // （q=qz(yaw)·qx(pitch)·qy(roll)，与 hipnuc 原始四元数同约定），
-                                    // PC 侧需用 ZXY 反解；见 trd_pc.cpp 的 QuatFromYawPitchRoll
+    float q[4];                     
 
     struct
     {
@@ -46,10 +44,9 @@ struct PCSendAutoAimData
         float pitch_vel;            // pitch轴角速度
     } pitch;
 
-    struct
-    {
-        uint16_t bullet_count;      // 子弹累计发送次数
-    } bullet;
+    float bullet_speed;      // 子弹速度
+
+    uint16_t bullet_count;      // 子弹累计发送次数
 
     uint16_t crc16;                 // 校验位
 };
@@ -85,7 +82,7 @@ struct PCRecvAutoAimData
 
 #pragma pack(pop)
 
-static_assert(sizeof(PCSendAutoAimData) == 39, "PCSendAutoAimData layout changed (PC 侧需同步)");
+static_assert(sizeof(PCSendAutoAimData) == 43, "PCSendAutoAimData layout changed (PC 侧需同步)");
 static_assert(sizeof(PCRecvAutoAimData) == 29, "PCRecvAutoAimData layout changed (PC 侧需同步)");
 
 namespace pc_proto

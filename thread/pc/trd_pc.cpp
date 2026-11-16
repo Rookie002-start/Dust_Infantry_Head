@@ -247,7 +247,7 @@ static bool SendToPc()
     PC_Send_Data.yaw.yaw_vel     = g_imu.gyro[2];     // z 轴角速度 → 偏航角速度
     PC_Send_Data.pitch.pitch_ang = g_imu.pitch;
     PC_Send_Data.pitch.pitch_vel = g_imu.gyro[1];     // y 轴角速度 → 俯仰角速度
-    PC_Send_Data.bullet.bullet_count = BulletCount();
+    PC_Send_Data.bullet_count = BulletCount();
     PC_Send_Data.crc16 = pc_proto::get_crc16_check_sum(
         reinterpret_cast<uint8_t *>(&PC_Send_Data),
         static_cast<uint32_t>(offsetof(PCSendAutoAimData, crc16)),

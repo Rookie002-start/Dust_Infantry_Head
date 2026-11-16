@@ -281,8 +281,8 @@ namespace thread::mcu_inter
                 // 只在来新一帧 PC 数据时折算一次；两帧之间目标保持不变（否则等于拿一个固定偏差
                 // 去追云台自己，误差恒为偏差 → 一直转）。参考角差一拍（≤1ms）可忽略。
                 if (new_pc) {
-                    aim_yaw_abs   = imu.yaw_total + kAimYawErrSign   * pc.yaw_ang;
-                    aim_pitch_abs = ClampAimPitch(imu.pitch + kAimPitchErrSign * pc.pitch_ang);
+                    aim_yaw_abs   = kAimYawErrSign   * pc.yaw_ang;
+                    aim_pitch_abs = ClampAimPitch(kAimPitchErrSign * pc.pitch_ang);
                 }
                 PutFloat(st.yaw_angle,   aim_yaw_abs);
                 PutFloat(st.yaw_omega,   pc.yaw_vel);
