@@ -271,12 +271,14 @@ static bool TxDue(uint32_t now)
 
 static void Task(void*, void*, void*)
 {
+    const int64_t period = k_ms_to_ticks_ceil64(0.5*kPeriodMs);
+    int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
     for (;;)
     {
 #if defined(CONFIG_WDT_SUPERVISOR)
         wdg_health::Mark(wdg_health::Service::Pc);
 #endif
-        const int64_t tick_start = k_uptime_ticks();
 
         // ① 收：USB 中断已把字节压进环形缓冲，这里等通知（超时 = 主循环节拍）
         (void)k_sem_take(&usb_.sem_, K_MSEC(kPeriodMs));
@@ -296,11 +298,13 @@ static void Task(void*, void*, void*)
             g_last_send_ms  = now;
         }
 
-        const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
-        const int64_t used   = k_uptime_ticks() - tick_start;
-        if (used < period) {
-            k_sleep(K_TICKS(period - used));
+        // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+        if (k_uptime_ticks() < deadline) {
+            k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+        } else {
+            deadline = k_uptime_ticks();
         }
+        deadline += period;
     }
 }
 
